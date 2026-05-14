@@ -1,0 +1,15 @@
+{
+  "name": "ask-max-netlify",
+  "version": "1.0.0",
+  "description": "Ask Max backend for OpenAI Assistant and Google Sheets logging",
+  "main": "index.js",
+  "scripts": {
+    "dev": "netlify dev"
+  },
+  "dependencies": {
+    "openai": "^6.0.0"
+  },
+  "devDependencies": {
+    "netlify-cli": "^17.0.0"
+  }
+}

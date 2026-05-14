@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <title>Ask Max Test</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 20px; }
+    label { display: block; margin-top: 12px; font-weight: bold; }
+    input, textarea, button { width: 100%; padding: 10px; margin-top: 6px; font-size: 16px; box-sizing: border-box; }
+    button { margin-top: 18px; cursor: pointer; }
+    .response { margin-top: 24px; padding: 16px; background: #f3f3f3; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Ask Max Test</h1>
+
+  <label>Name</label>
+  <input id="name" value="Carter" />
+
+  <label>Company</label>
+  <input id="company" value="Park Industries" />
+
+  <label>Machine</label>
+  <input id="machine" placeholder="Optional, example: TITAN 3700" />
+
+  <label>Message</label>
+  <textarea id="message" rows="4">I have a question about my TITAN 3700.</textarea>
+
+  <button onclick="sendMessage()">Send Test Message</button>
+  <button onclick="resetSession()">Reset Session</button>
+
+  <div class="response" id="response">Response will show here...</div>
+
+  <script>
+    async function sendMessage() {
+      const responseBox = document.getElementById("response");
+      responseBox.textContent = "Sending...";
+
+      const sessionId = sessionStorage.getItem("askMaxSessionId");
+      const threadId = sessionStorage.getItem("askMaxThreadId");
+      const startedAt = sessionStorage.getItem("askMaxStartedAt");
+
+      try {
+        const response = await fetch("/.netlify/functions/ask-max-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            sessionId,
+            threadId,
+            startedAt,
+            name: document.getElementById("name").value,
+            company: document.getElementById("company").value,
+            machine: document.getElementById("machine").value,
+            message: document.getElementById("message").value
+          })
+        });
+
+        const data = await response.json();
+
+        if (data.sessionId) sessionStorage.setItem("askMaxSessionId", data.sessionId);
+        if (data.threadId) sessionStorage.setItem("askMaxThreadId", data.threadId);
+        if (data.startedAt) sessionStorage.setItem("askMaxStartedAt", data.startedAt);
+
+        responseBox.textContent = JSON.stringify(data, null, 2);
+      } catch (error) {
+        responseBox.textContent = "Error: " + error.message;
+      }
+    }
+
+    function resetSession() {
+      sessionStorage.removeItem("askMaxSessionId");
+      sessionStorage.removeItem("askMaxThreadId");
+      sessionStorage.removeItem("askMaxStartedAt");
+      document.getElementById("response").textContent = "Session reset.";
+    }
+  </script>
+</body>
+</html>
