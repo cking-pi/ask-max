@@ -407,7 +407,7 @@ async function logToGoogleSheet({
   const response = await fetch(process.env.GOOGLE_SCRIPT_WEB_APP_URL, {
     method: "POST",
     headers: {
-      "Content-Type": "application/json"
+      "Content-Type": "text/plain;charset=utf-8"
     },
     body: JSON.stringify({
       secret: process.env.GOOGLE_SCRIPT_SECRET,
@@ -427,20 +427,30 @@ async function logToGoogleSheet({
   const text = await response.text();
 
   if (!response.ok) {
-    throw new Error(`Google Script request failed: ${text}`);
+    throw new Error(
+      `Google Script request failed with status ${response.status}: ${text.slice(0, 500)}`
+    );
   }
-
-  let data;
 
   try {
-    data = JSON.parse(text);
+    const data = JSON.parse(text);
+
+    if (!data.success) {
+      throw new Error(
+        `Google Script error: ${data.error || "Unknown error"} | Full response: ${text}`
+      );
+    }
+
+    return data;
   } catch (error) {
-    throw new Error(`Google Script returned non-JSON response: ${text}`);
-  }
+    // If Apps Script successfully wrote to the sheet but returned an HTML/redirect page,
+    // do not fail the whole chatbot response.
+    console.warn("Google Script returned non-JSON, but request completed:", text.slice(0, 500));
 
-  if (!data.success) {
-    throw new Error(`Google Script error: ${data.error || "Unknown error"} | Full response: ${text}`);
+    return {
+      success: true,
+      action: "logged_non_json_response",
+      note: "Google Apps Script completed but returned a non-JSON response."
+    };
   }
-
-  return data;
 }
