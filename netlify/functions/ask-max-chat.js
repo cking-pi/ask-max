@@ -30,25 +30,39 @@ exports.handler = async function (event) {
     const startedAt = cleanText(body.startedAt) || new Date().toISOString();
     const lastUpdatedAt = new Date().toISOString();
 
+    const existingName = cleanText(body.name);
+    const existingCompany = cleanText(body.company);
+    const existingMachine = cleanText(body.machine);
+
     if (!userMessage) {
       return jsonResponse(400, { error: "Message is required" }, corsHeaders);
     }
 
     const extracted = await extractSessionDetails(userMessage);
-    const machine = extractMachines(userMessage, extracted.machine);
+
+    const finalName = extracted.name || existingName;
+    const finalCompany = extracted.company || existingCompany;
+
+    const newlyDetectedMachine = extractMachines(userMessage, extracted.machine);
+    const finalMachine = mergeMachineText(existingMachine, newlyDetectedMachine);
 
     const assistantResult = await getAssistantReply({
       userMessage,
-      threadId: threadIdFromRequest
+      threadId: threadIdFromRequest,
+      sessionContext: {
+        name: finalName,
+        company: finalCompany,
+        machine: finalMachine
+      }
     });
 
     const googleLog = await logToGoogleSheet({
       sessionId,
       startedAt,
       lastUpdatedAt,
-      name: extracted.name,
-      company: extracted.company,
-      machine,
+      name: finalName,
+      company: finalCompany,
+      machine: finalMachine,
       userInput: userMessage,
       askMaxOutput: assistantResult.reply
     });
@@ -61,9 +75,9 @@ exports.handler = async function (event) {
         startedAt,
         lastUpdatedAt,
         reply: assistantResult.reply,
-        name: extracted.name,
-        company: extracted.company,
-        machine,
+        name: finalName,
+        company: finalCompany,
+        machine: finalMachine,
         googleLog
       },
       corsHeaders
@@ -131,6 +145,24 @@ function cleanText(value) {
 
 function createSessionId() {
   return `askmax_${Date.now()}_${crypto.randomUUID()}`;
+}
+
+function mergeMachineText(existingMachineText, newMachineText) {
+  const machines = new Set();
+
+  String(existingMachineText || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => machines.add(item));
+
+  String(newMachineText || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => machines.add(item));
+
+  return Array.from(machines).join("; ");
 }
 
 function extractMachines(userMessage, extractedMachineText = "") {
@@ -206,7 +238,7 @@ function extractMachines(userMessage, extractedMachineText = "") {
   return Array.from(machines).join("; ");
 }
 
-async function getAssistantReply({ userMessage, threadId }) {
+async function getAssistantReply({ userMessage, threadId, sessionContext }) {
   let activeThreadId = threadId;
 
   if (!activeThreadId) {
@@ -215,17 +247,27 @@ async function getAssistantReply({ userMessage, threadId }) {
   } else {
     const threadReady = await waitForNoActiveRuns(activeThreadId);
 
-    // If the previous thread is stuck or still active, start a new thread
-    // instead of letting Netlify time out.
     if (!threadReady) {
       const thread = await openai.beta.threads.create();
       activeThreadId = thread.id;
     }
   }
 
+  const contextText = `
+Known session context:
+Name: ${sessionContext.name || "Not provided yet"}
+Company: ${sessionContext.company || "Not provided yet"}
+Machine: ${sessionContext.machine || "Not provided yet"}
+
+Important:
+- If name, company, and machine are already provided above, do not ask for them again.
+- Answer the user's service or maintenance question using the known machine context.
+- Only ask for missing information if it is truly needed to answer the question.
+`.trim();
+
   await openai.beta.threads.messages.create(activeThreadId, {
     role: "user",
-    content: userMessage
+    content: `${contextText}\n\nUser message:\n${userMessage}`
   });
 
   const run = await openai.beta.threads.runs.createAndPoll(activeThreadId, {
@@ -289,52 +331,6 @@ async function waitForNoActiveRuns(threadId) {
   }
 
   return false;
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function waitForNoActiveRuns(threadId) {
-  const maxAttempts = 20;
-  const delayMs = 1000;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const runs = await openai.beta.threads.runs.list(threadId, {
-      limit: 5
-    });
-
-    const activeRun = runs.data.find((run) =>
-      ["queued", "in_progress", "requires_action", "cancelling"].includes(run.status)
-    );
-
-    if (!activeRun) {
-      return;
-    }
-
-    await sleep(delayMs);
-  }
-
-  throw new Error("Previous Ask Max response is still processing. Please wait a moment and try again.");
-}
-
-async function waitForRunCompletion(threadId, runId) {
-  const maxAttempts = 60;
-  const delayMs = 1000;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const run = await openai.beta.threads.runs.retrieve(threadId, runId);
-
-    if (
-      ["completed", "failed", "cancelled", "expired", "requires_action"].includes(run.status)
-    ) {
-      return run;
-    }
-
-    await sleep(delayMs);
-  }
-
-  throw new Error("Ask Max response timed out. Please try again.");
 }
 
 function sleep(ms) {
