@@ -64,36 +64,26 @@ exports.handler = async function (event) {
     const startedAt = cleanText(body.startedAt) || new Date().toISOString();
     const lastUpdatedAt = new Date().toISOString();
 
-    const existingName = cleanText(body.name);
-    const existingCompany = cleanText(body.company);
-    const existingMachine = cleanText(body.machine);
-
     if (!userMessage) {
       return jsonResponse(400, { error: "Message is required" }, corsHeaders);
     }
+
+    const extracted = await extractSessionDetails(userMessage);
+
+    const detectedMachines = extractMachines(userMessage);
+    const machine = mergeMachines(extracted.machine, detectedMachines);
 
     const assistantResult = await getAssistantReply({
       userMessage,
       threadId: threadIdFromRequest
     });
 
-    const extracted = await extractSessionDetails(userMessage);
-
-    const detectedMachines = extractMachines(userMessage);
-    const machine = mergeMachines(
-      existingMachine,
-      mergeMachines(extracted.machine, detectedMachines)
-    );
-
-    const name = existingName || extracted.name || "";
-    const company = existingCompany || extracted.company || "";
-
     await logToGoogleSheet({
       sessionId,
       startedAt,
       lastUpdatedAt,
-      name,
-      company,
+      name: extracted.name,
+      company: extracted.company,
       machine,
       userInput: userMessage,
       askMaxOutput: assistantResult.reply
@@ -107,8 +97,8 @@ exports.handler = async function (event) {
         startedAt,
         lastUpdatedAt,
         reply: assistantResult.reply,
-        name,
-        company,
+        name: extracted.name,
+        company: extracted.company,
         machine
       },
       corsHeaders
@@ -274,7 +264,7 @@ async function extractSessionDetails(userMessage) {
           content: `
 Extract session details from the user's message.
 
-Return only valid JSON with these fields:
+Return only valid JSON:
 {
   "name": "",
   "company": "",
@@ -282,10 +272,16 @@ Return only valid JSON with these fields:
 }
 
 Rules:
-- Only fill a field when the user clearly provides it.
+- Only fill fields that are clearly stated by the user.
 - Do not guess.
-- For company, capture the company name if provided.
-- For machine, capture Park Industries machine names or model names if provided.
+- If the user gives a phrase like "jon abc com titan 3700", infer:
+  name = "Jon"
+  company = "ABC Com"
+  machine = "TITAN 3700"
+- If the user gives "my name is Sarah from Stone Pros and I have a FASTBACK", infer:
+  name = "Sarah"
+  company = "Stone Pros"
+  machine = "FASTBACK"
 - If a field is not provided, return an empty string.
           `.trim()
         },
