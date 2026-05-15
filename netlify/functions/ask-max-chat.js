@@ -59,7 +59,7 @@ exports.handler = async function (event) {
       }
     });
 
-    const googleLog = await logToGoogleSheet({
+    const googleLog = await logToGoogleSheetWithTimeout({
       sessionId,
       startedAt,
       lastUpdatedAt,
@@ -169,13 +169,10 @@ function extractSessionDetailsLocal({
   existingMachine
 }) {
   const message = cleanText(userMessage);
-  const lower = message.toLowerCase();
+  const machine = extractMachines(message, "");
 
   let name = "";
   let company = "";
-  let machine = "";
-
-  machine = extractMachines(message, "");
 
   if (!existingName || !existingCompany) {
     let match;
@@ -212,9 +209,11 @@ function extractSessionDetailsLocal({
 
       if (words.length >= 3 && machine) {
         const machineWords = machine.toLowerCase().split(/\s+/);
+
         const nonMachineWords = words.filter((word) => {
           return !machineWords.some((machineWord) =>
-            machineWord.replace(/[^a-z0-9]/g, "") === word.toLowerCase().replace(/[^a-z0-9]/g, "")
+            machineWord.replace(/[^a-z0-9]/g, "") ===
+            word.toLowerCase().replace(/[^a-z0-9]/g, "")
           );
         });
 
@@ -234,14 +233,10 @@ function extractSessionDetailsLocal({
     company = "";
   }
 
-  if (existingMachine) {
-    machine = "";
-  }
-
   return {
     name,
     company,
-    machine
+    machine: existingMachine ? "" : machine
   };
 }
 
@@ -373,10 +368,11 @@ Company: ${sessionContext.company || "Not provided yet"}
 Machine: ${sessionContext.machine || "Not provided yet"}
 
 Important rules:
+- The first user message is usually their name and company because the chatbot already asked for it.
 - If name and company are already provided above, do not ask for them again.
 - If machine is already provided above, do not ask the user to confirm the machine.
 - If the user says a recognized Park Industries machine name, assume that is the machine they mean.
-- For example, if the machine is JAVELIN, assume they mean the JAVELIN CNC Sawjet. Do not ask them to confirm.
+- If the machine is JAVELIN, assume they mean the JAVELIN CNC Sawjet. Do not ask them to confirm.
 - Answer the user's service or maintenance question using the known machine context.
 - Only ask for missing information if it is truly required to answer the question.
 - If a safety, electrical, hydraulic, calibration-sensitive, or unclear service issue is involved, remind them to follow proper safety procedures and contact Park Industries service if needed.
@@ -427,7 +423,7 @@ Important rules:
   };
 }
 
-async function logToGoogleSheet({
+async function logToGoogleSheetWithTimeout({
   sessionId,
   startedAt,
   lastUpdatedAt,
@@ -437,51 +433,67 @@ async function logToGoogleSheet({
   userInput,
   askMaxOutput
 }) {
-  const response = await fetch(process.env.GOOGLE_SCRIPT_WEB_APP_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "text/plain;charset=utf-8"
-    },
-    body: JSON.stringify({
-      secret: process.env.GOOGLE_SCRIPT_SECRET,
-      sessionId,
-      startedAt,
-      lastUpdatedAt,
-      name,
-      company,
-      machine,
-      userInput,
-      askMaxOutput,
-      message: userInput,
-      reply: askMaxOutput
-    })
-  });
-
-  const text = await response.text();
-
-  if (!response.ok) {
-    throw new Error(
-      `Google Script request failed with status ${response.status}: ${text.slice(0, 500)}`
-    );
-  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
 
   try {
-    const data = JSON.parse(text);
+    const response = await fetch(process.env.GOOGLE_SCRIPT_WEB_APP_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain;charset=utf-8"
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        secret: process.env.GOOGLE_SCRIPT_SECRET,
+        sessionId,
+        startedAt,
+        lastUpdatedAt,
+        name,
+        company,
+        machine,
+        userInput,
+        askMaxOutput,
+        message: userInput,
+        reply: askMaxOutput
+      })
+    });
 
-    if (!data.success) {
-      throw new Error(
-        `Google Script error: ${data.error || "Unknown error"} | Full response: ${text}`
-      );
+    const text = await response.text();
+
+    if (!response.ok) {
+      return {
+        success: false,
+        action: "google_script_failed",
+        status: response.status,
+        responsePreview: text.slice(0, 300)
+      };
     }
 
-    return data;
+    try {
+      const data = JSON.parse(text);
+      return data;
+    } catch (error) {
+      return {
+        success: true,
+        action: "logged_non_json_response",
+        note: "Google Apps Script completed but returned non-JSON."
+      };
+    }
   } catch (error) {
-    console.warn("Google Script returned non-JSON, but request completed:", text.slice(0, 500));
+    if (error.name === "AbortError") {
+      return {
+        success: false,
+        action: "google_script_timeout",
+        note: "Google Sheet logging timed out, but Ask Max response was returned."
+      };
+    }
 
     return {
-      success: true,
-      action: "logged_non_json_response",
-      note: "Google Apps Script completed but returned a non-JSON response."
+      success: false,
+      action: "google_script_error",
+      error: error.message
     };
+  } finally {
+    clearTimeout(timeout);
   }
 }
