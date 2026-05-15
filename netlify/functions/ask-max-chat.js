@@ -221,14 +221,12 @@ async function getAssistantReply({ userMessage, threadId }) {
     content: userMessage
   });
 
-  const run = await openai.beta.threads.runs.create(activeThreadId, {
+  const run = await openai.beta.threads.runs.createAndPoll(activeThreadId, {
     assistant_id: process.env.OPENAI_ASSISTANT_ID
   });
 
-  const completedRun = await waitForRunCompletion(activeThreadId, run.id);
-
-  if (completedRun.status !== "completed") {
-    throw new Error(`Assistant run did not complete. Status: ${completedRun.status}`);
+  if (run.status !== "completed") {
+    throw new Error(`Assistant run did not complete. Status: ${run.status}`);
   }
 
   const messages = await openai.beta.threads.messages.list(activeThreadId, {
@@ -261,6 +259,35 @@ async function getAssistantReply({ userMessage, threadId }) {
     threadId: activeThreadId,
     reply: reply || "Sorry, I was not able to generate a response."
   };
+}
+
+async function waitForNoActiveRuns(threadId) {
+  const maxAttempts = 20;
+  const delayMs = 1000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const runs = await openai.beta.threads.runs.list(threadId, {
+      limit: 5
+    });
+
+    const activeRun = runs.data.find((run) =>
+      ["queued", "in_progress", "requires_action", "cancelling"].includes(run.status)
+    );
+
+    if (!activeRun) {
+      return;
+    }
+
+    await sleep(delayMs);
+  }
+
+  throw new Error(
+    "Previous Ask Max response is still processing. Please wait a moment and try again."
+  );
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function waitForNoActiveRuns(threadId) {
