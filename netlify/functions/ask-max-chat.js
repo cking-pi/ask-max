@@ -37,7 +37,12 @@ exports.handler = async function (event) {
       return jsonResponse(400, { error: "Message is required" }, corsHeaders);
     }
 
-    const extracted = await extractSessionDetails(userMessage);
+    const extracted = await extractSessionDetails({
+      userMessage,
+      existingName,
+      existingCompany,
+      existingMachine
+    });
 
     const finalName = extracted.name || existingName;
     const finalCompany = extracted.company || existingCompany;
@@ -246,10 +251,14 @@ Name: ${sessionContext.name || "Not provided yet"}
 Company: ${sessionContext.company || "Not provided yet"}
 Machine: ${sessionContext.machine || "Not provided yet"}
 
-Important:
-- If name, company, and machine are already provided above, do not ask for them again.
+Important rules:
+- If name and company are already provided above, do not ask for them again.
+- If machine is already provided above, do not ask the user to confirm the machine.
+- If the user says a recognized Park Industries machine name, assume that is the machine they mean.
+- For example, if the machine is JAVELIN, assume they mean the JAVELIN CNC Sawjet. Do not ask them to confirm.
 - Answer the user's service or maintenance question using the known machine context.
-- Only ask for missing information if it is truly needed to answer the question.
+- Only ask for missing information if it is truly required to answer the question.
+- If a safety, electrical, hydraulic, calibration-sensitive, or unclear service issue is involved, remind them to follow proper safety procedures and contact Park Industries service if needed.
 `.trim();
 
   await openai.beta.threads.messages.create(activeThreadId, {
@@ -297,7 +306,12 @@ Important:
   };
 }
 
-async function extractSessionDetails(userMessage) {
+async function extractSessionDetails({
+  userMessage,
+  existingName,
+  existingCompany,
+  existingMachine
+}) {
   try {
     const response = await openai.responses.create({
       model: process.env.OPENAI_EXTRACT_MODEL || "gpt-4.1-mini",
@@ -314,17 +328,29 @@ Return only valid JSON:
   "machine": ""
 }
 
+Context:
+- The chatbot's first prompt is always asking for the user's name and company name.
+- Therefore, if name and company are not already known, assume the user's first reply is likely their name and company.
+- Existing name: ${existingName || "Not known"}
+- Existing company: ${existingCompany || "Not known"}
+- Existing machine: ${existingMachine || "Not known"}
+
 Rules:
-- Only fill fields that are clearly stated by the user.
-- Do not guess.
-- If the user says "jon abc com titan 3700", infer:
+- Do not guess beyond the user's words, but do infer simple first-message formats.
+- If the user says "don of netlify", infer:
+  name = "Don"
+  company = "Netlify"
+- If the user says "jon from hubspot", infer:
+  name = "Jon"
+  company = "HubSpot"
+- If the user says "Jon ABC Company", infer:
+  name = "Jon"
+  company = "ABC Company"
+- If the user says "jon abc com", infer:
   name = "Jon"
   company = "ABC Com"
-  machine = "TITAN 3000 Series"
-- If the user says "my name is Sarah from Stone Pros and I have a FASTBACK", infer:
-  name = "Sarah"
-  company = "Stone Pros"
-  machine = "FASTBACK"
+- If existing name and company are already known, leave them blank unless the user clearly corrects them.
+- If the user says "javelin", infer machine = "JAVELIN".
 - If the user says "Voyager", infer machine = "VOYAGER XP".
 - If the user only says "TITAN" without a series or model, leave machine blank.
 - If a field is not provided, return an empty string.
@@ -341,7 +367,7 @@ Rules:
     const parsed = JSON.parse(text);
 
     return {
-      name: cleanText(parsed.name),
+      name: titleCase(cleanText(parsed.name)),
       company: cleanText(parsed.company),
       machine: cleanText(parsed.machine)
     };
@@ -354,6 +380,18 @@ Rules:
       machine: ""
     };
   }
+}
+
+function titleCase(value) {
+  return String(value || "")
+    .split(" ")
+    .map((word) => {
+      if (!word) return "";
+      if (word.toUpperCase() === word && word.length <= 4) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1);
+    })
+    .join(" ")
+    .trim();
 }
 
 async function logToGoogleSheet({
