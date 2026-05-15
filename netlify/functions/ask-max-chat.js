@@ -213,7 +213,14 @@ async function getAssistantReply({ userMessage, threadId }) {
     const thread = await openai.beta.threads.create();
     activeThreadId = thread.id;
   } else {
-    await waitForNoActiveRuns(activeThreadId);
+    const threadReady = await waitForNoActiveRuns(activeThreadId);
+
+    // If the previous thread is stuck or still active, start a new thread
+    // instead of letting Netlify time out.
+    if (!threadReady) {
+      const thread = await openai.beta.threads.create();
+      activeThreadId = thread.id;
+    }
   }
 
   await openai.beta.threads.messages.create(activeThreadId, {
@@ -262,8 +269,8 @@ async function getAssistantReply({ userMessage, threadId }) {
 }
 
 async function waitForNoActiveRuns(threadId) {
-  const maxAttempts = 20;
-  const delayMs = 1000;
+  const maxAttempts = 3;
+  const delayMs = 700;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const runs = await openai.beta.threads.runs.list(threadId, {
@@ -275,15 +282,13 @@ async function waitForNoActiveRuns(threadId) {
     );
 
     if (!activeRun) {
-      return;
+      return true;
     }
 
     await sleep(delayMs);
   }
 
-  throw new Error(
-    "Previous Ask Max response is still processing. Please wait a moment and try again."
-  );
+  return false;
 }
 
 function sleep(ms) {
