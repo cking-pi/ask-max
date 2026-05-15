@@ -1,405 +1,344 @@
-const OpenAI = require("openai");
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+  <title>Ask Max Test</title>
 
-const KNOWN_MACHINES = [
-  "SABERjet XP",
-  "SABERjet",
-  "SABER",
-  "JAVELIN",
-  "VOYAGER XP",
-  "TITAN 4000 Series",
-  "TITAN 3000 Series",
-  "TITAN 2000 Series",
-  "TITAN 1000 Series",
-  "TITAN Fab Center",
-  "SPARTAN",
-  "FASTBACK II",
-  "FASTBACK",
-  "Pro-Edge IV",
-  "DESTINY XE",
-  "DESTINY",
-  "HydroClear PRO",
-  "HydroClear",
-  "Side-Shot",
-  "SIERRA",
-  "YUKON II",
-  "YUKON",
-  "FUSION",
-  "HYDRASPLIT",
-  "THINSTONE TXS-3000",
-  "THINSTONE TXS-4000",
-  "Pathfinder",
-  "CrossCut XP",
-  "CrossCut",
-  "SlabVision",
-  "VELOCITY"
-];
-
-exports.handler = async function (event) {
-  const corsHeaders = getCorsHeaders(event);
-
-  if (event.httpMethod === "OPTIONS") {
-    return {
-      statusCode: 204,
-      headers: corsHeaders,
-      body: ""
-    };
-  }
-
-  if (event.httpMethod !== "POST") {
-    return jsonResponse(405, { error: "Method not allowed" }, corsHeaders);
-  }
-
-  try {
-    validateEnvironment();
-
-    const body = JSON.parse(event.body || "{}");
-
-    const userMessage = cleanText(body.message);
-    const sessionId = cleanText(body.sessionId) || createSessionId();
-    const threadIdFromRequest = cleanText(body.threadId);
-    const startedAt = cleanText(body.startedAt) || new Date().toISOString();
-    const lastUpdatedAt = new Date().toISOString();
-
-    if (!userMessage) {
-      return jsonResponse(400, { error: "Message is required" }, corsHeaders);
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      max-width: 900px;
+      margin: 40px auto;
+      padding: 20px;
+      background: #f5f5f5;
+      color: #111;
     }
 
-    const extracted = await extractSessionDetails(userMessage);
-    const machine = extractMachines(userMessage, extracted.machine);
-
-    const assistantResult = await getAssistantReply({
-      userMessage,
-      threadId: threadIdFromRequest
-    });
-
-    await logToGoogleSheet({
-      sessionId,
-      startedAt,
-      lastUpdatedAt,
-      name: extracted.name,
-      company: extracted.company,
-      machine,
-      userInput: userMessage,
-      askMaxOutput: assistantResult.reply
-    });
-
-    return jsonResponse(
-      200,
-      {
-        sessionId,
-        threadId: assistantResult.threadId,
-        startedAt,
-        lastUpdatedAt,
-        reply: assistantResult.reply,
-        name: extracted.name,
-        company: extracted.company,
-        machine
-      },
-      corsHeaders
-    );
-  } catch (error) {
-    console.error("Ask Max error:", error);
-
-    return jsonResponse(
-      500,
-      {
-        error: "Unable to process Ask Max request",
-        details: error.message
-      },
-      corsHeaders
-    );
-  }
-};
-
-function getCorsHeaders(event) {
-  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
-  const requestOrigin = event.headers.origin || event.headers.Origin || "";
-
-  const origin =
-    allowedOrigin === "*" || allowedOrigin === requestOrigin
-      ? allowedOrigin === "*"
-        ? "*"
-        : requestOrigin
-      : allowedOrigin;
-
-  return {
-    "Access-Control-Allow-Origin": origin,
-    "Access-Control-Allow-Headers": "Content-Type",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Content-Type": "application/json"
-  };
-}
-
-function jsonResponse(statusCode, body, headers) {
-  return {
-    statusCode,
-    headers,
-    body: JSON.stringify(body)
-  };
-}
-
-function validateEnvironment() {
-  const required = [
-    "OPENAI_API_KEY",
-    "OPENAI_ASSISTANT_ID",
-    "GOOGLE_SCRIPT_WEB_APP_URL",
-    "GOOGLE_SCRIPT_SECRET"
-  ];
-
-  const missing = required.filter((key) => !process.env[key]);
-
-  if (missing.length) {
-    throw new Error(`Missing environment variables: ${missing.join(", ")}`);
-  }
-}
-
-function cleanText(value) {
-  if (typeof value !== "string") return "";
-  return value.trim();
-}
-
-function createSessionId() {
-  return `askmax_${Date.now()}_${crypto.randomUUID()}`;
-}
-
-function extractMachines(userMessage, extractedMachineText = "") {
-  const combinedText = `${userMessage} ${extractedMachineText}`.toLowerCase();
-  const machines = new Set();
-
-  const has = (pattern) => pattern.test(combinedText);
-
-  // TITAN series handling.
-  // This prevents plain "TITAN" from being logged as a machine by itself.
-  if (has(/\btitan\s*4(?:000)?\b/i) || has(/\btitan\s*4000\s*series\b/i)) {
-    machines.add("TITAN 4000 Series");
-  }
-
-  if (has(/\btitan\s*3(?:000)?\b/i) || has(/\btitan\s*3000\s*series\b/i)) {
-    machines.add("TITAN 3000 Series");
-  }
-
-  if (has(/\btitan\s*2(?:000)?\b/i) || has(/\btitan\s*2000\s*series\b/i)) {
-    machines.add("TITAN 2000 Series");
-  }
-
-  if (has(/\btitan\s*1(?:000)?\b/i) || has(/\btitan\s*1000\s*series\b/i)) {
-    machines.add("TITAN 1000 Series");
-  }
-
-  if (has(/\btitan\s*fab\s*center\b/i)) {
-    machines.add("TITAN Fab Center");
-  }
-
-  // Voyager should normalize to VOYAGER XP.
-  if (has(/\bvoyager(?:\s*xp)?\b/i)) {
-    machines.add("VOYAGER XP");
-  }
-
-  // Prefer more specific versions first.
-  const machinePatterns = [
-    ["SABERjet XP", /\bsaber\s*jet\s*xp\b|\bsaberjet\s*xp\b/i],
-    ["SABERjet", /\bsaber\s*jet\b|\bsaberjet\b/i],
-    ["SABER", /\bsaber\b/i],
-    ["JAVELIN", /\bjavelin\b/i],
-    ["SPARTAN", /\bspartan\b/i],
-    ["FASTBACK II", /\bfastback\s*ii\b|\bfastback\s*2\b/i],
-    ["FASTBACK", /\bfastback\b/i],
-    ["Pro-Edge IV", /\bpro[-\s]*edge\s*iv\b|\bpro[-\s]*edge\s*4\b/i],
-    ["DESTINY XE", /\bdestiny\s*xe\b/i],
-    ["DESTINY", /\bdestiny\b/i],
-    ["HydroClear PRO", /\bhydro\s*clear\s*pro\b|\bhydroclear\s*pro\b/i],
-    ["HydroClear", /\bhydro\s*clear\b|\bhydroclear\b/i],
-    ["Side-Shot", /\bside[-\s]*shot\b/i],
-    ["SIERRA", /\bsierra\b/i],
-    ["YUKON II", /\byukon\s*ii\b|\byukon\s*2\b/i],
-    ["YUKON", /\byukon\b/i],
-    ["FUSION", /\bfusion\b/i],
-    ["HYDRASPLIT", /\bhydra\s*split\b|\bhydrasplit\b/i],
-    ["THINSTONE TXS-3000", /\bthinstone\s*txs[-\s]*3000\b|\btxs[-\s]*3000\b/i],
-    ["THINSTONE TXS-4000", /\bthinstone\s*txs[-\s]*4000\b|\btxs[-\s]*4000\b/i],
-    ["Pathfinder", /\bpathfinder\b/i],
-    ["CrossCut XP", /\bcross\s*cut\s*xp\b|\bcrosscut\s*xp\b/i],
-    ["CrossCut", /\bcross\s*cut\b|\bcrosscut\b/i],
-    ["SlabVision", /\bslab\s*vision\b|\bslabvision\b/i],
-    ["VELOCITY", /\bvelocity\b/i]
-  ];
-
-  for (const [machineName, pattern] of machinePatterns) {
-    if (has(pattern)) {
-      machines.add(machineName);
+    h1 {
+      margin-bottom: 8px;
     }
-  }
 
-  // Remove less specific duplicates when a more specific version exists.
-  if (machines.has("FASTBACK II")) machines.delete("FASTBACK");
-  if (machines.has("DESTINY XE")) machines.delete("DESTINY");
-  if (machines.has("HydroClear PRO")) machines.delete("HydroClear");
-  if (machines.has("YUKON II")) machines.delete("YUKON");
-  if (machines.has("CrossCut XP")) machines.delete("CrossCut");
+    .subhead {
+      margin-top: 0;
+      color: #555;
+      font-size: 15px;
+    }
 
-  return Array.from(machines).join("; ");
-}
+    .chat-wrapper {
+      background: #ffffff;
+      border: 1px solid #ddd;
+      border-radius: 10px;
+      overflow: hidden;
+      margin-top: 24px;
+    }
 
-async function getAssistantReply({ userMessage, threadId }) {
-  let activeThreadId = threadId;
+    .chat-header {
+      background: #04173f;
+      color: #ffffff;
+      padding: 16px 18px;
+      font-weight: bold;
+    }
 
-  if (!activeThreadId) {
-    const thread = await openai.beta.threads.create();
-    activeThreadId = thread.id;
-  }
+    .chat-box {
+      min-height: 360px;
+      max-height: 520px;
+      overflow-y: auto;
+      padding: 18px;
+      background: #ebe7db;
+      white-space: pre-wrap;
+      line-height: 1.45;
+    }
 
-  await openai.beta.threads.messages.create(activeThreadId, {
-    role: "user",
-    content: userMessage
-  });
+    .message {
+      margin-bottom: 16px;
+      padding: 12px 14px;
+      border-radius: 10px;
+      max-width: 82%;
+      word-wrap: break-word;
+    }
 
-  const run = await openai.beta.threads.runs.createAndPoll(activeThreadId, {
-    assistant_id: process.env.OPENAI_ASSISTANT_ID
-  });
+    .bot {
+      background: #ffffff;
+      color: #111;
+      margin-right: auto;
+    }
 
-  if (run.status !== "completed") {
-    throw new Error(`Assistant run did not complete. Status: ${run.status}`);
-  }
+    .user {
+      background: #321061;
+      color: #ffffff;
+      margin-left: auto;
+    }
 
-  const messages = await openai.beta.threads.messages.list(activeThreadId, {
-    limit: 10
-  });
+    .input-area {
+      display: flex;
+      gap: 10px;
+      padding: 14px;
+      background: #ffffff;
+      border-top: 1px solid #ddd;
+    }
 
-  const latestAssistantMessage = messages.data.find(
-    (message) => message.role === "assistant"
-  );
+    textarea {
+      flex: 1;
+      min-height: 54px;
+      max-height: 140px;
+      padding: 12px;
+      font-size: 15px;
+      font-family: Arial, sans-serif;
+      resize: vertical;
+      border: 1px solid #ccc;
+      border-radius: 8px;
+      box-sizing: border-box;
+    }
 
-  if (!latestAssistantMessage) {
-    return {
-      threadId: activeThreadId,
-      reply: "Sorry, I was not able to generate a response."
-    };
-  }
+    button {
+      padding: 0 18px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 15px;
+      font-weight: bold;
+      background: #321061;
+      color: #ffffff;
+    }
 
-  const reply = latestAssistantMessage.content
-    .map((contentItem) => {
-      if (contentItem.type === "text") {
-        return contentItem.text.value;
+    button.secondary {
+      background: #666;
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+
+    .status {
+      margin-top: 14px;
+      padding: 12px;
+      background: #ffffff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      color: #444;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+
+    .debug {
+      margin-top: 14px;
+      padding: 12px;
+      background: #111;
+      color: #f5f5f5;
+      border-radius: 8px;
+      font-size: 13px;
+      white-space: pre-wrap;
+      display: none;
+    }
+
+    .actions {
+      margin-top: 12px;
+      display: flex;
+      gap: 10px;
+    }
+
+    .actions button {
+      padding: 10px 14px;
+    }
+
+    @media (max-width: 700px) {
+      body {
+        margin: 20px auto;
+        padding: 12px;
       }
 
-      return "";
-    })
-    .join("\n")
-    .trim();
+      .input-area {
+        flex-direction: column;
+      }
 
-  return {
-    threadId: activeThreadId,
-    reply: reply || "Sorry, I was not able to generate a response."
-  };
-}
+      button {
+        padding: 12px 16px;
+      }
 
-async function extractSessionDetails(userMessage) {
-  try {
-    const response = await openai.responses.create({
-      model: process.env.OPENAI_EXTRACT_MODEL || "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content: `
-Extract session details from the user's message.
+      .message {
+        max-width: 94%;
+      }
+    }
+  </style>
+</head>
 
-Return only valid JSON:
-{
-  "name": "",
-  "company": "",
-  "machine": ""
-}
+<body>
+  <h1>Ask Max Test</h1>
+  <p class="subhead">
+    Temporary test page for the Netlify backend before connecting the HubSpot module.
+  </p>
 
-Rules:
-- Only fill fields that are clearly stated by the user.
-- Do not guess.
-- If the user gives "jon with abc com on a titan 3700", infer:
-  name = "Jon"
-  company = "ABC Com"
-  machine = "TITAN 3000 Series"
-- If the user says "my name is Sarah from Stone Pros and I have a FASTBACK", infer:
-  name = "Sarah"
-  company = "Stone Pros"
-  machine = "FASTBACK"
-- If the user only asks a technical question and does not provide name or company, leave those blank.
-- If a field is not provided, return an empty string.
-          `.trim()
-        },
-        {
-          role: "user",
-          content: userMessage
-        }
-      ]
+  <div class="chat-wrapper">
+    <div class="chat-header">
+      Ask Max
+    </div>
+
+    <div class="chat-box" id="chatBox">
+      <div class="message bot">
+Ask Max: Hi there! Can I get your name, company name, and the machine you're working with?
+      </div>
+    </div>
+
+    <div class="input-area">
+      <textarea
+        id="messageInput"
+        placeholder="Example: My name is Jon from ABC Com. I have a question about our Voyager."
+      ></textarea>
+
+      <button id="sendButton" onclick="sendMessage()">
+        Send
+      </button>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="secondary" onclick="resetSession()">Reset Session</button>
+    <button class="secondary" onclick="toggleDebug()">Show/Hide Debug</button>
+  </div>
+
+  <div class="status" id="status">
+    Status: Waiting for message.
+  </div>
+
+  <div class="debug" id="debugBox">
+    Debug details will show here.
+  </div>
+
+  <script>
+    const FUNCTION_URL = "/.netlify/functions/ask-max-chat";
+
+    const chatBox = document.getElementById("chatBox");
+    const messageInput = document.getElementById("messageInput");
+    const sendButton = document.getElementById("sendButton");
+    const statusBox = document.getElementById("status");
+    const debugBox = document.getElementById("debugBox");
+
+    messageInput.addEventListener("keydown", function(event) {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        sendMessage();
+      }
     });
 
-    const text = response.output_text || "{}";
-    const parsed = JSON.parse(text);
+    function addMessage(text, type) {
+      const message = document.createElement("div");
+      message.className = "message " + type;
+      message.textContent = text;
+      chatBox.appendChild(message);
+      chatBox.scrollTop = chatBox.scrollHeight;
+    }
 
-    return {
-      name: cleanText(parsed.name),
-      company: cleanText(parsed.company),
-      machine: cleanText(parsed.machine)
-    };
-  } catch (error) {
-    console.error("Extraction error:", error);
+    async function sendMessage() {
+      const message = messageInput.value.trim();
 
-    return {
-      name: "",
-      company: "",
-      machine: ""
-    };
-  }
-}
+      if (!message) {
+        statusBox.textContent = "Status: Type a message first.";
+        return;
+      }
 
-async function logToGoogleSheet({
-  sessionId,
-  startedAt,
-  lastUpdatedAt,
-  name,
-  company,
-  machine,
-  userInput,
-  askMaxOutput
-}) {
-  const response = await fetch(process.env.GOOGLE_SCRIPT_WEB_APP_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      secret: process.env.GOOGLE_SCRIPT_SECRET,
-      sessionId,
-      startedAt,
-      lastUpdatedAt,
-      name,
-      company,
-      machine,
-      userInput,
-      askMaxOutput
-    })
-  });
+      const sessionId = sessionStorage.getItem("askMaxSessionId");
+      const threadId = sessionStorage.getItem("askMaxThreadId");
+      const startedAt = sessionStorage.getItem("askMaxStartedAt");
 
-  const text = await response.text();
+      addMessage("You: " + message, "user");
 
-  if (!response.ok) {
-    throw new Error(`Google Script request failed: ${text}`);
-  }
+      messageInput.value = "";
+      sendButton.disabled = true;
+      statusBox.textContent = "Status: Max is thinking...";
 
-  let data;
+      try {
+        const response = await fetch(FUNCTION_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            sessionId: sessionId,
+            threadId: threadId,
+            startedAt: startedAt,
+            message: message
+          })
+        });
 
-  try {
-    data = JSON.parse(text);
-  } catch (error) {
-    throw new Error(`Google Script returned non-JSON response: ${text}`);
-  }
+        const data = await response.json();
 
-  if (!data.success) {
-    throw new Error(`Google Script error: ${data.error || "Unknown error"}`);
-  }
+        if (!response.ok) {
+          throw new Error(data.details || data.error || "Request failed.");
+        }
 
-  return data;
-}
+        if (data.sessionId) {
+          sessionStorage.setItem("askMaxSessionId", data.sessionId);
+        }
+
+        if (data.threadId) {
+          sessionStorage.setItem("askMaxThreadId", data.threadId);
+        }
+
+        if (data.startedAt) {
+          sessionStorage.setItem("askMaxStartedAt", data.startedAt);
+        }
+
+        addMessage("Ask Max: " + (data.reply || "No reply returned."), "bot");
+
+        statusBox.innerHTML =
+          "<strong>Status:</strong> Logged to backend.<br>" +
+          "<strong>Name:</strong> " + escapeHtml(data.name || "not captured") + "<br>" +
+          "<strong>Company:</strong> " + escapeHtml(data.company || "not captured") + "<br>" +
+          "<strong>Machine:</strong> " + escapeHtml(data.machine || "not captured") + "<br>" +
+          "<strong>Session ID:</strong> " + escapeHtml(data.sessionId || "missing") + "<br>" +
+          "<strong>Thread ID:</strong> " + escapeHtml(data.threadId || "missing");
+
+        debugBox.textContent = JSON.stringify(data, null, 2);
+
+      } catch (error) {
+        addMessage("Error: " + error.message, "bot");
+
+        statusBox.innerHTML =
+          "<strong>Status:</strong> Something went wrong.<br>" +
+          "<strong>Error:</strong> " + escapeHtml(error.message);
+
+        debugBox.textContent = error.stack || error.message;
+      } finally {
+        sendButton.disabled = false;
+        messageInput.focus();
+      }
+    }
+
+    function resetSession() {
+      sessionStorage.removeItem("askMaxSessionId");
+      sessionStorage.removeItem("askMaxThreadId");
+      sessionStorage.removeItem("askMaxStartedAt");
+
+      chatBox.innerHTML = "";
+
+      addMessage(
+        "Ask Max: Hi there! Can I get your name, company name, and the machine you're working with?",
+        "bot"
+      );
+
+      statusBox.textContent = "Status: Session reset.";
+      debugBox.textContent = "Session reset.";
+      messageInput.value = "";
+      messageInput.focus();
+    }
+
+    function toggleDebug() {
+      debugBox.style.display = debugBox.style.display === "none" || !debugBox.style.display
+        ? "block"
+        : "none";
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+  </script>
+</body>
+</html>
