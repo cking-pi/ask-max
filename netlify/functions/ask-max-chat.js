@@ -37,7 +37,7 @@ exports.handler = async function (event) {
       return jsonResponse(400, { error: "Message is required" }, corsHeaders);
     }
 
-    const extracted = await extractSessionDetails({
+    const extracted = extractSessionDetailsLocal({
       userMessage,
       existingName,
       existingCompany,
@@ -148,6 +148,127 @@ function cleanText(value) {
 
 function createSessionId() {
   return `askmax_${Date.now()}_${crypto.randomUUID()}`;
+}
+
+function titleCase(value) {
+  return String(value || "")
+    .split(" ")
+    .map((word) => {
+      if (!word) return "";
+      if (word.toUpperCase() === word && word.length <= 4) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(" ")
+    .trim();
+}
+
+function extractSessionDetailsLocal({
+  userMessage,
+  existingName,
+  existingCompany,
+  existingMachine
+}) {
+  const message = cleanText(userMessage);
+  const lower = message.toLowerCase();
+
+  let name = "";
+  let company = "";
+  let machine = "";
+
+  machine = extractMachines(message, "");
+
+  if (!existingName || !existingCompany) {
+    let match;
+
+    match = message.match(/^(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
+    if (match) {
+      name = cleanLikelyName(match[1]);
+      company = cleanLikelyCompany(match[2]);
+    }
+
+    if (!name && !company) {
+      match = message.match(/^my name is\s+(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
+      if (match) {
+        name = cleanLikelyName(match[1]);
+        company = cleanLikelyCompany(match[2]);
+      }
+    }
+
+    if (!name && !company) {
+      match = message.match(/^i'?m\s+(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
+      if (match) {
+        name = cleanLikelyName(match[1]);
+        company = cleanLikelyCompany(match[2]);
+      }
+    }
+
+    if (!name && !company) {
+      const words = message.split(/\s+/).filter(Boolean);
+
+      if (words.length >= 2 && words.length <= 6 && !machine) {
+        name = cleanLikelyName(words[0]);
+        company = cleanLikelyCompany(words.slice(1).join(" "));
+      }
+
+      if (words.length >= 3 && machine) {
+        const machineWords = machine.toLowerCase().split(/\s+/);
+        const nonMachineWords = words.filter((word) => {
+          return !machineWords.some((machineWord) =>
+            machineWord.replace(/[^a-z0-9]/g, "") === word.toLowerCase().replace(/[^a-z0-9]/g, "")
+          );
+        });
+
+        if (nonMachineWords.length >= 2) {
+          name = cleanLikelyName(nonMachineWords[0]);
+          company = cleanLikelyCompany(nonMachineWords.slice(1).join(" "));
+        }
+      }
+    }
+  }
+
+  if (existingName) {
+    name = "";
+  }
+
+  if (existingCompany) {
+    company = "";
+  }
+
+  if (existingMachine) {
+    machine = "";
+  }
+
+  return {
+    name,
+    company,
+    machine
+  };
+}
+
+function cleanLikelyName(value) {
+  let cleaned = cleanText(value)
+    .replace(/^my name is\s+/i, "")
+    .replace(/^i'?m\s+/i, "")
+    .replace(/[.,]+$/g, "")
+    .trim();
+
+  const words = cleaned.split(/\s+/).filter(Boolean);
+
+  if (!words.length || words.length > 3) return "";
+
+  return titleCase(words.join(" "));
+}
+
+function cleanLikelyCompany(value) {
+  let cleaned = cleanText(value)
+    .replace(/\b(?:and|i|we)\s+(?:have|need|am|are|use|using).*$/i, "")
+    .replace(/\b(?:javelin|voyager|saberjet|saber|titan|spartan|fastback|yukon|fusion|crosscut|slabvision|velocity).*$/i, "")
+    .replace(/[.,]+$/g, "")
+    .trim();
+
+  if (!cleaned) return "";
+
+  return titleCase(cleaned);
 }
 
 function mergeMachineText(existingMachineText, newMachineText) {
@@ -306,94 +427,6 @@ Important rules:
   };
 }
 
-async function extractSessionDetails({
-  userMessage,
-  existingName,
-  existingCompany,
-  existingMachine
-}) {
-  try {
-    const response = await openai.responses.create({
-      model: process.env.OPENAI_EXTRACT_MODEL || "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content: `
-Extract session details from the user's message.
-
-Return only valid JSON:
-{
-  "name": "",
-  "company": "",
-  "machine": ""
-}
-
-Context:
-- The chatbot's first prompt is always asking for the user's name and company name.
-- Therefore, if name and company are not already known, assume the user's first reply is likely their name and company.
-- Existing name: ${existingName || "Not known"}
-- Existing company: ${existingCompany || "Not known"}
-- Existing machine: ${existingMachine || "Not known"}
-
-Rules:
-- Do not guess beyond the user's words, but do infer simple first-message formats.
-- If the user says "don of netlify", infer:
-  name = "Don"
-  company = "Netlify"
-- If the user says "jon from hubspot", infer:
-  name = "Jon"
-  company = "HubSpot"
-- If the user says "Jon ABC Company", infer:
-  name = "Jon"
-  company = "ABC Company"
-- If the user says "jon abc com", infer:
-  name = "Jon"
-  company = "ABC Com"
-- If existing name and company are already known, leave them blank unless the user clearly corrects them.
-- If the user says "javelin", infer machine = "JAVELIN".
-- If the user says "Voyager", infer machine = "VOYAGER XP".
-- If the user only says "TITAN" without a series or model, leave machine blank.
-- If a field is not provided, return an empty string.
-          `.trim()
-        },
-        {
-          role: "user",
-          content: userMessage
-        }
-      ]
-    });
-
-    const text = response.output_text || "{}";
-    const parsed = JSON.parse(text);
-
-    return {
-      name: titleCase(cleanText(parsed.name)),
-      company: cleanText(parsed.company),
-      machine: cleanText(parsed.machine)
-    };
-  } catch (error) {
-    console.error("Extraction error:", error);
-
-    return {
-      name: "",
-      company: "",
-      machine: ""
-    };
-  }
-}
-
-function titleCase(value) {
-  return String(value || "")
-    .split(" ")
-    .map((word) => {
-      if (!word) return "";
-      if (word.toUpperCase() === word && word.length <= 4) return word;
-      return word.charAt(0).toUpperCase() + word.slice(1);
-    })
-    .join(" ")
-    .trim();
-}
-
 async function logToGoogleSheet({
   sessionId,
   startedAt,
@@ -443,8 +476,6 @@ async function logToGoogleSheet({
 
     return data;
   } catch (error) {
-    // If Apps Script successfully wrote to the sheet but returned an HTML/redirect page,
-    // do not fail the whole chatbot response.
     console.warn("Google Script returned non-JSON, but request completed:", text.slice(0, 500));
 
     return {
