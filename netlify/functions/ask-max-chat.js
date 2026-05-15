@@ -26,7 +26,6 @@ exports.handler = async function (event) {
 
     const userMessage = cleanText(body.message);
     const sessionId = cleanText(body.sessionId) || createSessionId();
-    const threadIdFromRequest = cleanText(body.threadId);
     const startedAt = cleanText(body.startedAt) || new Date().toISOString();
     const lastUpdatedAt = new Date().toISOString();
 
@@ -48,7 +47,6 @@ exports.handler = async function (event) {
 
     const assistantResult = await getAssistantReply({
       userMessage,
-      threadId: threadIdFromRequest,
       sessionContext: {
         name: finalName,
         company: finalCompany,
@@ -238,20 +236,9 @@ function extractMachines(userMessage, extractedMachineText = "") {
   return Array.from(machines).join("; ");
 }
 
-async function getAssistantReply({ userMessage, threadId, sessionContext }) {
-  let activeThreadId = threadId;
-
-  if (!activeThreadId) {
-    const thread = await openai.beta.threads.create();
-    activeThreadId = thread.id;
-  } else {
-    const threadReady = await waitForNoActiveRuns(activeThreadId);
-
-    if (!threadReady) {
-      const thread = await openai.beta.threads.create();
-      activeThreadId = thread.id;
-    }
-  }
+async function getAssistantReply({ userMessage, sessionContext }) {
+  const thread = await openai.beta.threads.create();
+  const activeThreadId = thread.id;
 
   const contextText = `
 Known session context:
@@ -308,33 +295,6 @@ Important:
     threadId: activeThreadId,
     reply: reply || "Sorry, I was not able to generate a response."
   };
-}
-
-async function waitForNoActiveRuns(threadId) {
-  const maxAttempts = 3;
-  const delayMs = 700;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const runs = await openai.beta.threads.runs.list(threadId, {
-      limit: 5
-    });
-
-    const activeRun = runs.data.find((run) =>
-      ["queued", "in_progress", "requires_action", "cancelling"].includes(run.status)
-    );
-
-    if (!activeRun) {
-      return true;
-    }
-
-    await sleep(delayMs);
-  }
-
-  return false;
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function extractSessionDetails(userMessage) {
