@@ -4,10 +4,9 @@ This zip intentionally does not include API keys or secrets. Add them in Netlify
 
 Required variables:
 
-OPENAI_API_KEY=your-new-regenerated-openai-key
-OPENAI_ASSISTANT_ID=asst_3MY9cgKUV05e8sNbSnHhiZKs
-GOOGLE_SCRIPT_WEB_APP_URL=https://script.google.com/macros/s/AKfycbwFnwq8cxjsDomquXICDLFKqHXFjynb0Qyf_E3eVT-PZoxKRCSQB7TgSjFR0ccuzNjOqg/exec
-GOOGLE_SCRIPT_SECRET=askmax-park-titan
+OPENAI_ASSISTANT_ID=your_openai_assistant_id
+GOOGLE_SCRIPT_WEB_APP_URL=your_google_script_web_app_url
+GOOGLE_SCRIPT_SECRET=your_google_script_secret
 ALLOWED_ORIGIN=*
 
 For launch, change ALLOWED_ORIGIN to:
