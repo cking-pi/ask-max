@@ -26,29 +26,46 @@ exports.handler = async function (event) {
 
     const userMessage = cleanText(body.message);
     const sessionId = cleanText(body.sessionId) || createSessionId();
-    const threadIdFromRequest = cleanText(body.threadId);
     const startedAt = cleanText(body.startedAt) || new Date().toISOString();
     const lastUpdatedAt = new Date().toISOString();
+
+    const existingName = cleanText(body.name);
+    const existingCompany = cleanText(body.company);
+    const existingMachine = cleanText(body.machine);
 
     if (!userMessage) {
       return jsonResponse(400, { error: "Message is required" }, corsHeaders);
     }
 
-    const extracted = await extractSessionDetails(userMessage);
-    const machine = extractMachines(userMessage, extracted.machine);
+    const extracted = extractSessionDetailsLocal({
+      userMessage,
+      existingName,
+      existingCompany,
+      existingMachine
+    });
+
+    const finalName = existingName || extracted.name;
+    const finalCompany = existingCompany || extracted.company;
+
+    const detectedMachine = extractMachines(userMessage, extracted.machine);
+    const finalMachine = mergeMachineText(existingMachine, detectedMachine);
 
     const assistantResult = await getAssistantReply({
       userMessage,
-      threadId: threadIdFromRequest
+      sessionContext: {
+        name: finalName,
+        company: finalCompany,
+        machine: finalMachine
+      }
     });
 
-    const googleLog = await logToGoogleSheet({
+    const googleLog = await logToGoogleSheetWithTimeout({
       sessionId,
       startedAt,
       lastUpdatedAt,
-      name: extracted.name,
-      company: extracted.company,
-      machine,
+      name: finalName,
+      company: finalCompany,
+      machine: finalMachine,
       userInput: userMessage,
       askMaxOutput: assistantResult.reply
     });
@@ -57,13 +74,12 @@ exports.handler = async function (event) {
       200,
       {
         sessionId,
-        threadId: assistantResult.threadId,
         startedAt,
         lastUpdatedAt,
         reply: assistantResult.reply,
-        name: extracted.name,
-        company: extracted.company,
-        machine,
+        name: finalName,
+        company: finalCompany,
+        machine: finalMachine,
         googleLog
       },
       corsHeaders
@@ -131,6 +147,116 @@ function cleanText(value) {
 
 function createSessionId() {
   return `askmax_${Date.now()}_${crypto.randomUUID()}`;
+}
+
+function titleCase(value) {
+  return String(value || "")
+    .split(" ")
+    .map((word) => {
+      if (!word) return "";
+      if (word.toUpperCase() === word && word.length <= 4) return word;
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(" ")
+    .trim();
+}
+
+function extractSessionDetailsLocal({
+  userMessage,
+  existingName,
+  existingCompany,
+  existingMachine
+}) {
+  const message = cleanText(userMessage);
+  const detectedMachine = extractMachines(message, "");
+
+  let name = "";
+  let company = "";
+
+  if (!existingName || !existingCompany) {
+    let match;
+
+    match = message.match(/^(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
+    if (match) {
+      name = cleanLikelyName(match[1]);
+      company = cleanLikelyCompany(match[2]);
+    }
+
+    if (!name && !company) {
+      match = message.match(/^my name is\s+(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
+      if (match) {
+        name = cleanLikelyName(match[1]);
+        company = cleanLikelyCompany(match[2]);
+      }
+    }
+
+    if (!name && !company) {
+      match = message.match(/^i'?m\s+(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
+      if (match) {
+        name = cleanLikelyName(match[1]);
+        company = cleanLikelyCompany(match[2]);
+      }
+    }
+
+    if (!name && !company) {
+      const words = message.split(/\s+/).filter(Boolean);
+
+      if (words.length >= 2 && words.length <= 6 && !detectedMachine) {
+        name = cleanLikelyName(words[0]);
+        company = cleanLikelyCompany(words.slice(1).join(" "));
+      }
+    }
+  }
+
+  return {
+    name: existingName ? "" : name,
+    company: existingCompany ? "" : company,
+    machine: existingMachine ? "" : detectedMachine
+  };
+}
+
+function cleanLikelyName(value) {
+  let cleaned = cleanText(value)
+    .replace(/^my name is\s+/i, "")
+    .replace(/^i'?m\s+/i, "")
+    .replace(/[.,]+$/g, "")
+    .trim();
+
+  const words = cleaned.split(/\s+/).filter(Boolean);
+
+  if (!words.length || words.length > 3) return "";
+
+  return titleCase(words.join(" "));
+}
+
+function cleanLikelyCompany(value) {
+  let cleaned = cleanText(value)
+    .replace(/\b(?:and|i|we)\s+(?:have|need|am|are|use|using).*$/i, "")
+    .replace(/\b(?:javelin|voyager|saberjet|saber|titan|spartan|fastback|yukon|fusion|crosscut|slabvision|velocity).*$/i, "")
+    .replace(/[.,]+$/g, "")
+    .trim();
+
+  if (!cleaned) return "";
+
+  return titleCase(cleaned);
+}
+
+function mergeMachineText(existingMachineText, newMachineText) {
+  const machines = new Set();
+
+  String(existingMachineText || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => machines.add(item));
+
+  String(newMachineText || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => machines.add(item));
+
+  return Array.from(machines).join("; ");
 }
 
 function extractMachines(userMessage, extractedMachineText = "") {
@@ -206,17 +332,30 @@ function extractMachines(userMessage, extractedMachineText = "") {
   return Array.from(machines).join("; ");
 }
 
-async function getAssistantReply({ userMessage, threadId }) {
-  let activeThreadId = threadId;
+async function getAssistantReply({ userMessage, sessionContext }) {
+  const thread = await openai.beta.threads.create();
+  const activeThreadId = thread.id;
 
-  if (!activeThreadId) {
-    const thread = await openai.beta.threads.create();
-    activeThreadId = thread.id;
-  }
+  const contextText = `
+Known session context:
+Name: ${sessionContext.name || "Not provided yet"}
+Company: ${sessionContext.company || "Not provided yet"}
+Machine: ${sessionContext.machine || "Not provided yet"}
+
+Important rules:
+- The first user message is usually their name and company because the chatbot already asked for it.
+- If name and company are already provided above, do not ask for them again.
+- If machine is already provided above, do not ask the user to confirm the machine.
+- If the user says a recognized Park Industries machine name, assume that is the machine they mean.
+- If the machine is JAVELIN, assume they mean the JAVELIN CNC Sawjet. Do not ask them to confirm.
+- Answer the user's service or maintenance question using the known machine context.
+- Only ask for missing information if it is truly required to answer the question.
+- If a safety, electrical, hydraulic, calibration-sensitive, or unclear service issue is involved, remind them to follow proper safety procedures and contact Park Industries service if needed.
+`.trim();
 
   await openai.beta.threads.messages.create(activeThreadId, {
     role: "user",
-    content: userMessage
+    content: `${contextText}\n\nUser message:\n${userMessage}`
   });
 
   const run = await openai.beta.threads.runs.createAndPoll(activeThreadId, {
@@ -259,66 +398,7 @@ async function getAssistantReply({ userMessage, threadId }) {
   };
 }
 
-async function extractSessionDetails(userMessage) {
-  try {
-    const response = await openai.responses.create({
-      model: process.env.OPENAI_EXTRACT_MODEL || "gpt-4.1-mini",
-      input: [
-        {
-          role: "system",
-          content: `
-Extract session details from the user's message.
-
-Return only valid JSON:
-{
-  "name": "",
-  "company": "",
-  "machine": ""
-}
-
-Rules:
-- Only fill fields that are clearly stated by the user.
-- Do not guess.
-- If the user says "jon abc com titan 3700", infer:
-  name = "Jon"
-  company = "ABC Com"
-  machine = "TITAN 3000 Series"
-- If the user says "my name is Sarah from Stone Pros and I have a FASTBACK", infer:
-  name = "Sarah"
-  company = "Stone Pros"
-  machine = "FASTBACK"
-- If the user says "Voyager", infer machine = "VOYAGER XP".
-- If the user only says "TITAN" without a series or model, leave machine blank.
-- If a field is not provided, return an empty string.
-          `.trim()
-        },
-        {
-          role: "user",
-          content: userMessage
-        }
-      ]
-    });
-
-    const text = response.output_text || "{}";
-    const parsed = JSON.parse(text);
-
-    return {
-      name: cleanText(parsed.name),
-      company: cleanText(parsed.company),
-      machine: cleanText(parsed.machine)
-    };
-  } catch (error) {
-    console.error("Extraction error:", error);
-
-    return {
-      name: "",
-      company: "",
-      machine: ""
-    };
-  }
-}
-
-async function logToGoogleSheet({
+async function logToGoogleSheetWithTimeout({
   sessionId,
   startedAt,
   lastUpdatedAt,
@@ -328,43 +408,57 @@ async function logToGoogleSheet({
   userInput,
   askMaxOutput
 }) {
-  const response = await fetch(process.env.GOOGLE_SCRIPT_WEB_APP_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      secret: process.env.GOOGLE_SCRIPT_SECRET,
-      sessionId,
-      startedAt,
-      lastUpdatedAt,
-      name,
-      company,
-      machine,
-      userInput,
-      askMaxOutput,
-      message: userInput,
-      reply: askMaxOutput
-    })
-  });
-
-  const text = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`Google Script request failed: ${text}`);
-  }
-
-  let data;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1500);
 
   try {
-    data = JSON.parse(text);
+    const response = await fetch(process.env.GOOGLE_SCRIPT_WEB_APP_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain;charset=utf-8"
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        secret: process.env.GOOGLE_SCRIPT_SECRET,
+        sessionId,
+        startedAt,
+        lastUpdatedAt,
+        name,
+        company,
+        machine,
+        userInput,
+        askMaxOutput,
+        message: userInput,
+        reply: askMaxOutput
+      })
+    });
+
+    const text = await response.text();
+
+    if (!response.ok) {
+      return {
+        success: false,
+        action: "google_script_failed",
+        status: response.status,
+        responsePreview: text.slice(0, 300)
+      };
+    }
+
+    try {
+      return JSON.parse(text);
+    } catch (error) {
+      return {
+        success: true,
+        action: "logged_non_json_response"
+      };
+    }
   } catch (error) {
-    throw new Error(`Google Script returned non-JSON response: ${text}`);
+    return {
+      success: false,
+      action: error.name === "AbortError" ? "google_script_timeout" : "google_script_error",
+      error: error.message
+    };
+  } finally {
+    clearTimeout(timeout);
   }
-
-  if (!data.success) {
-    throw new Error(`Google Script error: ${data.error || "Unknown error"} | Full response: ${text}`);
-  }
-
-  return data;
 }
