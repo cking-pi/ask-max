@@ -212,6 +212,8 @@ async function getAssistantReply({ userMessage, threadId }) {
   if (!activeThreadId) {
     const thread = await openai.beta.threads.create();
     activeThreadId = thread.id;
+  } else {
+    await waitForNoActiveRuns(activeThreadId);
   }
 
   await openai.beta.threads.messages.create(activeThreadId, {
@@ -219,12 +221,14 @@ async function getAssistantReply({ userMessage, threadId }) {
     content: userMessage
   });
 
-  const run = await openai.beta.threads.runs.createAndPoll(activeThreadId, {
+  const run = await openai.beta.threads.runs.create(activeThreadId, {
     assistant_id: process.env.OPENAI_ASSISTANT_ID
   });
 
-  if (run.status !== "completed") {
-    throw new Error(`Assistant run did not complete. Status: ${run.status}`);
+  const completedRun = await waitForRunCompletion(activeThreadId, run.id);
+
+  if (completedRun.status !== "completed") {
+    throw new Error(`Assistant run did not complete. Status: ${completedRun.status}`);
   }
 
   const messages = await openai.beta.threads.messages.list(activeThreadId, {
@@ -257,6 +261,52 @@ async function getAssistantReply({ userMessage, threadId }) {
     threadId: activeThreadId,
     reply: reply || "Sorry, I was not able to generate a response."
   };
+}
+
+async function waitForNoActiveRuns(threadId) {
+  const maxAttempts = 20;
+  const delayMs = 1000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const runs = await openai.beta.threads.runs.list(threadId, {
+      limit: 5
+    });
+
+    const activeRun = runs.data.find((run) =>
+      ["queued", "in_progress", "requires_action", "cancelling"].includes(run.status)
+    );
+
+    if (!activeRun) {
+      return;
+    }
+
+    await sleep(delayMs);
+  }
+
+  throw new Error("Previous Ask Max response is still processing. Please wait a moment and try again.");
+}
+
+async function waitForRunCompletion(threadId, runId) {
+  const maxAttempts = 60;
+  const delayMs = 1000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const run = await openai.beta.threads.runs.retrieve(threadId, runId);
+
+    if (
+      ["completed", "failed", "cancelled", "expired", "requires_action"].includes(run.status)
+    ) {
+      return run;
+    }
+
+    await sleep(delayMs);
+  }
+
+  throw new Error("Ask Max response timed out. Please try again.");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function extractSessionDetails(userMessage) {
