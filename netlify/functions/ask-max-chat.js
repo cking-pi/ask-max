@@ -1,231 +1,370 @@
-(function () {
-  const modules = document.querySelectorAll(".ask-max-module");
+const OpenAI = require("openai");
 
-  modules.forEach(function (moduleRoot, index) {
-    const form = moduleRoot.querySelector("[data-ask-max-form]");
-    const input = moduleRoot.querySelector("[data-ask-max-input]");
-    const messages = moduleRoot.querySelector("[data-ask-max-messages]");
-    const status = moduleRoot.querySelector("[data-ask-max-status]");
-    const sendButton = moduleRoot.querySelector(".ask-max-send");
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
-    if (!form || !input || !messages || !sendButton) return;
+exports.handler = async function (event) {
+  const corsHeaders = getCorsHeaders(event);
 
-    const endpoint =
-      moduleRoot.dataset.endpoint ||
-      "https://askmax-pi.netlify.app/.netlify/functions/ask-max-chat";
+  if (event.httpMethod === "OPTIONS") {
+    return {
+      statusCode: 204,
+      headers: corsHeaders,
+      body: ""
+    };
+  }
 
-    const storagePrefix = "askMax_" + index + "_";
-    const sessionIdKey = storagePrefix + "sessionId";
-    const threadIdKey = storagePrefix + "threadId";
-    const startedAtKey = storagePrefix + "startedAt";
-    const nameKey = storagePrefix + "name";
-    const companyKey = storagePrefix + "company";
-    const machineKey = storagePrefix + "machine";
+  if (event.httpMethod !== "POST") {
+    return jsonResponse(405, { error: "Method not allowed" }, corsHeaders);
+  }
 
-    let isSending = false;
+  try {
+    validateEnvironment();
 
-    form.addEventListener("submit", function (event) {
-      event.preventDefault();
-      sendMessage();
+    const body = JSON.parse(event.body || "{}");
+
+    const userMessage = cleanText(body.message);
+    const sessionId = cleanText(body.sessionId) || createSessionId();
+    const threadIdFromRequest = cleanText(body.threadId);
+    const startedAt = cleanText(body.startedAt) || new Date().toISOString();
+    const lastUpdatedAt = new Date().toISOString();
+
+    if (!userMessage) {
+      return jsonResponse(400, { error: "Message is required" }, corsHeaders);
+    }
+
+    const extracted = await extractSessionDetails(userMessage);
+    const machine = extractMachines(userMessage, extracted.machine);
+
+    const assistantResult = await getAssistantReply({
+      userMessage,
+      threadId: threadIdFromRequest
     });
 
-    input.addEventListener("keydown", function (event) {
-      if (event.key === "Enter" && !event.shiftKey) {
-        event.preventDefault();
-        sendMessage();
-      }
+    const googleLog = await logToGoogleSheet({
+      sessionId,
+      startedAt,
+      lastUpdatedAt,
+      name: extracted.name,
+      company: extracted.company,
+      machine,
+      userInput: userMessage,
+      askMaxOutput: assistantResult.reply
     });
 
-    input.addEventListener("input", autoResizeInput);
+    return jsonResponse(
+      200,
+      {
+        sessionId,
+        threadId: assistantResult.threadId,
+        startedAt,
+        lastUpdatedAt,
+        reply: assistantResult.reply,
+        name: extracted.name,
+        company: extracted.company,
+        machine,
+        googleLog
+      },
+      corsHeaders
+    );
+  } catch (error) {
+    console.error("Ask Max error:", error);
 
-    function addMessage(text, type, options) {
-      const message = document.createElement("div");
-      message.className = "ask-max-message ask-max-" + type;
+    return jsonResponse(
+      500,
+      {
+        error: "Unable to process Ask Max request",
+        details: error.message
+      },
+      corsHeaders
+    );
+  }
+};
 
-      if (options && options.extraClass) {
-        message.classList.add(options.extraClass);
-      }
+function getCorsHeaders(event) {
+  const allowedOrigin = process.env.ALLOWED_ORIGIN || "*";
+  const requestOrigin = event.headers.origin || event.headers.Origin || "";
 
-      if (options && options.html) {
-        message.innerHTML = options.html;
-      } else {
-        message.innerHTML = linkifyText(text);
-      }
+  const origin =
+    allowedOrigin === "*" || allowedOrigin === requestOrigin
+      ? allowedOrigin === "*"
+        ? "*"
+        : requestOrigin
+      : allowedOrigin;
 
-      messages.appendChild(message);
-      scrollToBottom();
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Content-Type": "application/json"
+  };
+}
 
-      return message;
+function jsonResponse(statusCode, body, headers) {
+  return {
+    statusCode,
+    headers,
+    body: JSON.stringify(body)
+  };
+}
+
+function validateEnvironment() {
+  const required = [
+    "OPENAI_API_KEY",
+    "OPENAI_ASSISTANT_ID",
+    "GOOGLE_SCRIPT_WEB_APP_URL",
+    "GOOGLE_SCRIPT_SECRET"
+  ];
+
+  const missing = required.filter((key) => !process.env[key]);
+
+  if (missing.length) {
+    throw new Error(`Missing environment variables: ${missing.join(", ")}`);
+  }
+}
+
+function cleanText(value) {
+  if (typeof value !== "string") return "";
+  return value.trim();
+}
+
+function createSessionId() {
+  return `askmax_${Date.now()}_${crypto.randomUUID()}`;
+}
+
+function extractMachines(userMessage, extractedMachineText = "") {
+  const combinedText = `${userMessage} ${extractedMachineText}`.toLowerCase();
+  const machines = new Set();
+
+  const has = (pattern) => pattern.test(combinedText);
+
+  if (has(/\btitan\s*4(?:000)?\b/i) || has(/\btitan\s*4000\s*series\b/i)) {
+    machines.add("TITAN 4000 Series");
+  }
+
+  if (has(/\btitan\s*3(?:000)?\b/i) || has(/\btitan\s*3000\s*series\b/i)) {
+    machines.add("TITAN 3000 Series");
+  }
+
+  if (has(/\btitan\s*2(?:000)?\b/i) || has(/\btitan\s*2000\s*series\b/i)) {
+    machines.add("TITAN 2000 Series");
+  }
+
+  if (has(/\btitan\s*1(?:000)?\b/i) || has(/\btitan\s*1000\s*series\b/i)) {
+    machines.add("TITAN 1000 Series");
+  }
+
+  if (has(/\btitan\s*fab\s*center\b/i)) {
+    machines.add("TITAN Fab Center");
+  }
+
+  if (has(/\bvoyager(?:\s*xp)?\b/i)) {
+    machines.add("VOYAGER XP");
+  }
+
+  const machinePatterns = [
+    ["SABERjet XP", /\bsaber\s*jet\s*xp\b|\bsaberjet\s*xp\b/i],
+    ["SABERjet", /\bsaber\s*jet\b|\bsaberjet\b/i],
+    ["SABER", /\bsaber\b/i],
+    ["JAVELIN", /\bjavelin\b/i],
+    ["SPARTAN", /\bspartan\b/i],
+    ["FASTBACK II", /\bfastback\s*ii\b|\bfastback\s*2\b/i],
+    ["FASTBACK", /\bfastback\b/i],
+    ["Pro-Edge IV", /\bpro[-\s]*edge\s*iv\b|\bpro[-\s]*edge\s*4\b/i],
+    ["DESTINY XE", /\bdestiny\s*xe\b/i],
+    ["DESTINY", /\bdestiny\b/i],
+    ["HydroClear PRO", /\bhydro\s*clear\s*pro\b|\bhydroclear\s*pro\b/i],
+    ["HydroClear", /\bhydro\s*clear\b|\bhydroclear\b/i],
+    ["Side-Shot", /\bside[-\s]*shot\b/i],
+    ["SIERRA", /\bsierra\b/i],
+    ["YUKON II", /\byukon\s*ii\b|\byukon\s*2\b/i],
+    ["YUKON", /\byukon\b/i],
+    ["FUSION", /\bfusion\b/i],
+    ["HYDRASPLIT", /\bhydra\s*split\b|\bhydrasplit\b/i],
+    ["THINSTONE TXS-3000", /\bthinstone\s*txs[-\s]*3000\b|\btxs[-\s]*3000\b/i],
+    ["THINSTONE TXS-4000", /\bthinstone\s*txs[-\s]*4000\b|\btxs[-\s]*4000\b/i],
+    ["Pathfinder", /\bpathfinder\b/i],
+    ["CrossCut XP", /\bcross\s*cut\s*xp\b|\bcrosscut\s*xp\b/i],
+    ["CrossCut", /\bcross\s*cut\b|\bcrosscut\b/i],
+    ["SlabVision", /\bslab\s*vision\b|\bslabvision\b/i],
+    ["VELOCITY", /\bvelocity\b/i]
+  ];
+
+  for (const [machineName, pattern] of machinePatterns) {
+    if (has(pattern)) {
+      machines.add(machineName);
     }
+  }
 
-    function addTypingMessage() {
-      return addMessage("", "bot", {
-        extraClass: "ask-max-loading",
-        html:
-          '<span class="ask-max-typing" aria-label="Max is thinking">' +
-          "<span></span><span></span><span></span>" +
-          "</span>"
-      });
-    }
+  if (machines.has("FASTBACK II")) machines.delete("FASTBACK");
+  if (machines.has("DESTINY XE")) machines.delete("DESTINY");
+  if (machines.has("HydroClear PRO")) machines.delete("HydroClear");
+  if (machines.has("YUKON II")) machines.delete("YUKON");
+  if (machines.has("CrossCut XP")) machines.delete("CrossCut");
 
-    async function sendMessage() {
-      if (isSending) {
-        return;
-      }
+  return Array.from(machines).join("; ");
+}
 
-      const userMessage = input.value.trim();
+async function getAssistantReply({ userMessage, threadId }) {
+  let activeThreadId = threadId;
 
-      if (!userMessage) {
-        setStatus("Please type a message first.");
-        return;
-      }
+  if (!activeThreadId) {
+    const thread = await openai.beta.threads.create();
+    activeThreadId = thread.id;
+  }
 
-      isSending = true;
-
-      const sessionId = sessionStorage.getItem(sessionIdKey);
-      const threadId = sessionStorage.getItem(threadIdKey);
-      const startedAt = sessionStorage.getItem(startedAtKey);
-
-      const savedName = sessionStorage.getItem(nameKey) || "";
-      const savedCompany = sessionStorage.getItem(companyKey) || "";
-      const savedMachine = sessionStorage.getItem(machineKey) || "";
-
-      addMessage(userMessage, "user");
-
-      input.value = "";
-      autoResizeInput();
-
-      sendButton.disabled = true;
-      input.disabled = true;
-      setStatus("");
-
-      const typingMessage = addTypingMessage();
-
-      try {
-        const response = await fetch(endpoint, {
-          method: "POST",
-          mode: "cors",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            sessionId: sessionId,
-            threadId: threadId,
-            startedAt: startedAt,
-            message: userMessage,
-            name: savedName,
-            company: savedCompany,
-            machine: savedMachine
-          })
-        });
-
-        const responseText = await response.text();
-
-        let data;
-
-        try {
-          data = JSON.parse(responseText);
-        } catch (error) {
-          throw new Error(
-            "Server returned non-JSON response: " + responseText.slice(0, 250)
-          );
-        }
-
-        if (!response.ok) {
-          throw new Error(data.details || data.error || "Request failed.");
-        }
-
-        if (data.sessionId) {
-          sessionStorage.setItem(sessionIdKey, data.sessionId);
-        }
-
-        if (data.threadId) {
-          sessionStorage.setItem(threadIdKey, data.threadId);
-        }
-
-        if (data.startedAt) {
-          sessionStorage.setItem(startedAtKey, data.startedAt);
-        }
-
-        if (data.name) {
-          sessionStorage.setItem(nameKey, data.name);
-        }
-
-        if (data.company) {
-          sessionStorage.setItem(companyKey, data.company);
-        }
-
-        if (data.machine) {
-          sessionStorage.setItem(machineKey, data.machine);
-        }
-
-        typingMessage.remove();
-
-        addMessage(
-          data.reply || "Sorry, I was not able to generate a response.",
-          "bot"
-        );
-
-        setStatus("");
-      } catch (error) {
-        typingMessage.remove();
-
-        addMessage(
-          "Sorry, something went wrong. Please try again or contact our service team for support.",
-          "bot"
-        );
-
-        setStatus("Error: " + error.message);
-        console.error("Ask Max error:", error);
-      } finally {
-        isSending = false;
-        sendButton.disabled = false;
-        input.disabled = false;
-        input.focus();
-      }
-    }
-
-    function setStatus(text) {
-      if (status) {
-        status.textContent = text || "";
-      }
-    }
-
-    function autoResizeInput() {
-      input.style.height = "auto";
-      input.style.height = Math.min(input.scrollHeight, 130) + "px";
-    }
-
-    function scrollToBottom() {
-      messages.scrollTop = messages.scrollHeight;
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;")
-        .replace(/"/g, "&quot;")
-        .replace(/'/g, "&#039;");
-    }
-
-    function linkifyText(text) {
-      const escaped = escapeHtml(text || "");
-      const urlRegex = /(https?:\/\/[^\s<]+)/g;
-
-      return escaped.replace(urlRegex, function (url) {
-        const cleanUrl = url.replace(/[),.]+$/, "");
-        const trailing = url.slice(cleanUrl.length);
-
-        return (
-          '<a href="' +
-          cleanUrl +
-          '" target="_blank" rel="noopener noreferrer">' +
-          cleanUrl +
-          "</a>" +
-          trailing
-        );
-      });
-    }
+  await openai.beta.threads.messages.create(activeThreadId, {
+    role: "user",
+    content: userMessage
   });
-})();
+
+  const run = await openai.beta.threads.runs.createAndPoll(activeThreadId, {
+    assistant_id: process.env.OPENAI_ASSISTANT_ID
+  });
+
+  if (run.status !== "completed") {
+    throw new Error(`Assistant run did not complete. Status: ${run.status}`);
+  }
+
+  const messages = await openai.beta.threads.messages.list(activeThreadId, {
+    limit: 10
+  });
+
+  const latestAssistantMessage = messages.data.find(
+    (message) => message.role === "assistant"
+  );
+
+  if (!latestAssistantMessage) {
+    return {
+      threadId: activeThreadId,
+      reply: "Sorry, I was not able to generate a response."
+    };
+  }
+
+  const reply = latestAssistantMessage.content
+    .map((contentItem) => {
+      if (contentItem.type === "text") {
+        return contentItem.text.value;
+      }
+
+      return "";
+    })
+    .join("\n")
+    .trim();
+
+  return {
+    threadId: activeThreadId,
+    reply: reply || "Sorry, I was not able to generate a response."
+  };
+}
+
+async function extractSessionDetails(userMessage) {
+  try {
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_EXTRACT_MODEL || "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: `
+Extract session details from the user's message.
+
+Return only valid JSON:
+{
+  "name": "",
+  "company": "",
+  "machine": ""
+}
+
+Rules:
+- Only fill fields that are clearly stated by the user.
+- Do not guess.
+- If the user says "jon abc com titan 3700", infer:
+  name = "Jon"
+  company = "ABC Com"
+  machine = "TITAN 3000 Series"
+- If the user says "my name is Sarah from Stone Pros and I have a FASTBACK", infer:
+  name = "Sarah"
+  company = "Stone Pros"
+  machine = "FASTBACK"
+- If the user says "Voyager", infer machine = "VOYAGER XP".
+- If the user only says "TITAN" without a series or model, leave machine blank.
+- If a field is not provided, return an empty string.
+          `.trim()
+        },
+        {
+          role: "user",
+          content: userMessage
+        }
+      ]
+    });
+
+    const text = response.output_text || "{}";
+    const parsed = JSON.parse(text);
+
+    return {
+      name: cleanText(parsed.name),
+      company: cleanText(parsed.company),
+      machine: cleanText(parsed.machine)
+    };
+  } catch (error) {
+    console.error("Extraction error:", error);
+
+    return {
+      name: "",
+      company: "",
+      machine: ""
+    };
+  }
+}
+
+async function logToGoogleSheet({
+  sessionId,
+  startedAt,
+  lastUpdatedAt,
+  name,
+  company,
+  machine,
+  userInput,
+  askMaxOutput
+}) {
+  const response = await fetch(process.env.GOOGLE_SCRIPT_WEB_APP_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      secret: process.env.GOOGLE_SCRIPT_SECRET,
+      sessionId,
+      startedAt,
+      lastUpdatedAt,
+      name,
+      company,
+      machine,
+      userInput,
+      askMaxOutput,
+      message: userInput,
+      reply: askMaxOutput
+    })
+  });
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`Google Script request failed: ${text}`);
+  }
+
+  let data;
+
+  try {
+    data = JSON.parse(text);
+  } catch (error) {
+    throw new Error(`Google Script returned non-JSON response: ${text}`);
+  }
+
+  if (!data.success) {
+    throw new Error(`Google Script error: ${data.error || "Unknown error"} | Full response: ${text}`);
+  }
+
+  return data;
+}
