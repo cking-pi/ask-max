@@ -5,37 +5,48 @@ const openai = new OpenAI({
 });
 
 const KNOWN_MACHINES = [
-  "SABERjet XL",
   "SABERjet XP",
   "SABERjet",
+  "SABER",
   "JAVELIN",
-  "TITAN 4800",
-  "TITAN 4700",
-  "TITAN 3700",
-  "TITAN 3000",
-  "TITAN",
   "VOYAGER XP",
-  "VOYAGER",
-  "FASTBACK",
+  "TITAN 4000 Series",
+  "TITAN 3000 Series",
+  "TITAN 2000 Series",
+  "TITAN 1000 Series",
+  "TITAN Fab Center",
   "SPARTAN",
+  "FASTBACK",
+  "FASTBACK II",
+  "Pro-Edge IV",
+  "DESTINY",
+  "DESTINY XE",
+  "HydroClear",
+  "HydroClear PRO",
+  "Side-Shot",
+  "SIERRA",
   "YUKON",
+  "YUKON II",
   "FUSION",
   "HYDRASPLIT",
-  "THINSTONE",
-  "TXS",
+  "THINSTONE TXS-3000",
+  "THINSTONE TXS-4000",
   "Pathfinder",
   "CrossCut XP",
   "CrossCut",
   "SlabVision",
-  "Load N Go",
-  "Load N' Go"
+  "VELOCITY",
 ];
 
 exports.handler = async function (event) {
   const corsHeaders = getCorsHeaders(event);
 
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: corsHeaders, body: "" };
+    return {
+      statusCode: 204,
+      headers: corsHeaders,
+      body: ""
+    };
   }
 
   if (event.httpMethod !== "POST") {
@@ -53,21 +64,29 @@ exports.handler = async function (event) {
     const startedAt = cleanText(body.startedAt) || new Date().toISOString();
     const lastUpdatedAt = new Date().toISOString();
 
-    const name = cleanText(body.name);
-    const company = cleanText(body.company);
+    const existingName = cleanText(body.name);
+    const existingCompany = cleanText(body.company);
     const existingMachine = cleanText(body.machine);
 
     if (!userMessage) {
       return jsonResponse(400, { error: "Message is required" }, corsHeaders);
     }
 
-    const detectedMachines = extractMachines(userMessage);
-    const machine = mergeMachines(existingMachine, detectedMachines);
-
     const assistantResult = await getAssistantReply({
       userMessage,
       threadId: threadIdFromRequest
     });
+
+    const extracted = await extractSessionDetails(userMessage);
+
+    const detectedMachines = extractMachines(userMessage);
+    const machine = mergeMachines(
+      existingMachine,
+      mergeMachines(extracted.machine, detectedMachines)
+    );
+
+    const name = existingName || extracted.name || "";
+    const company = existingCompany || extracted.company || "";
 
     await logToGoogleSheet({
       sessionId,
@@ -75,7 +94,9 @@ exports.handler = async function (event) {
       lastUpdatedAt,
       name,
       company,
-      machine
+      machine,
+      userInput: userMessage,
+      askMaxOutput: assistantResult.reply
     });
 
     return jsonResponse(
@@ -86,6 +107,8 @@ exports.handler = async function (event) {
         startedAt,
         lastUpdatedAt,
         reply: assistantResult.reply,
+        name,
+        company,
         machine
       },
       corsHeaders
@@ -124,7 +147,11 @@ function getCorsHeaders(event) {
 }
 
 function jsonResponse(statusCode, body, headers) {
-  return { statusCode, headers, body: JSON.stringify(body) };
+  return {
+    statusCode,
+    headers,
+    body: JSON.stringify(body)
+  };
 }
 
 function validateEnvironment() {
@@ -159,21 +186,27 @@ function extractMachines(message) {
   );
 }
 
-function mergeMachines(existingMachineText, newMachines) {
+function mergeMachines(existingMachineText, newMachinesOrText) {
   const machines = new Set();
 
-  if (existingMachineText) {
-    existingMachineText
+  String(existingMachineText || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => machines.add(item));
+
+  if (Array.isArray(newMachinesOrText)) {
+    newMachinesOrText
+      .map((item) => String(item).trim())
+      .filter(Boolean)
+      .forEach((item) => machines.add(item));
+  } else {
+    String(newMachinesOrText || "")
       .split(";")
       .map((item) => item.trim())
       .filter(Boolean)
       .forEach((item) => machines.add(item));
   }
-
-  newMachines
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .forEach((item) => machines.add(item));
 
   return Array.from(machines).join("; ");
 }
@@ -219,6 +252,7 @@ async function getAssistantReply({ userMessage, threadId }) {
       if (contentItem.type === "text") {
         return contentItem.text.value;
       }
+
       return "";
     })
     .join("\n")
@@ -230,17 +264,72 @@ async function getAssistantReply({ userMessage, threadId }) {
   };
 }
 
+async function extractSessionDetails(userMessage) {
+  try {
+    const response = await openai.responses.create({
+      model: process.env.OPENAI_EXTRACT_MODEL || "gpt-4.1-mini",
+      input: [
+        {
+          role: "system",
+          content: `
+Extract session details from the user's message.
+
+Return only valid JSON with these fields:
+{
+  "name": "",
+  "company": "",
+  "machine": ""
+}
+
+Rules:
+- Only fill a field when the user clearly provides it.
+- Do not guess.
+- For company, capture the company name if provided.
+- For machine, capture Park Industries machine names or model names if provided.
+- If a field is not provided, return an empty string.
+          `.trim()
+        },
+        {
+          role: "user",
+          content: userMessage
+        }
+      ]
+    });
+
+    const text = response.output_text || "{}";
+    const parsed = JSON.parse(text);
+
+    return {
+      name: cleanText(parsed.name),
+      company: cleanText(parsed.company),
+      machine: cleanText(parsed.machine)
+    };
+  } catch (error) {
+    console.error("Extraction error:", error);
+
+    return {
+      name: "",
+      company: "",
+      machine: ""
+    };
+  }
+}
+
 async function logToGoogleSheet({
   sessionId,
   startedAt,
   lastUpdatedAt,
   name,
   company,
-  machine
+  machine,
+  userInput,
+  askMaxOutput
 }) {
   const response = await fetch(process.env.GOOGLE_SCRIPT_WEB_APP_URL, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json"
+    },
     body: JSON.stringify({
       secret: process.env.GOOGLE_SCRIPT_SECRET,
       sessionId,
@@ -248,7 +337,9 @@ async function logToGoogleSheet({
       lastUpdatedAt,
       name,
       company,
-      machine
+      machine,
+      userInput,
+      askMaxOutput
     })
   });
 
