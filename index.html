@@ -278,7 +278,15 @@ Ask Max: Hi there! Can I get your name, company name, and the machine you're wor
           })
         });
 
-        const data = await response.json();
+        const responseText = await response.text();
+        
+        let data;
+        
+        try {
+          data = JSON.parse(responseText);
+        } catch (error) {
+          throw new Error("Server returned non-JSON response: " + responseText.slice(0, 300));
+        }
 
         if (!response.ok) {
           throw new Error(data.details || data.error || "Request failed.");
