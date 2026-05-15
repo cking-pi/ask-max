@@ -217,6 +217,8 @@ Ask Max: Hi there! Can I get your name, company name, and the machine you're wor
     const statusBox = document.getElementById("status");
     const debugBox = document.getElementById("debugBox");
 
+    let isSending = false;
+
     messageInput.addEventListener("keydown", function(event) {
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
@@ -227,12 +229,16 @@ Ask Max: Hi there! Can I get your name, company name, and the machine you're wor
     function addMessage(text, type) {
       const message = document.createElement("div");
       message.className = "message " + type;
-      message.textContent = text;
+      message.innerHTML = linkifyText(text);
       chatBox.appendChild(message);
       chatBox.scrollTop = chatBox.scrollHeight;
     }
 
     async function sendMessage() {
+      if (isSending) {
+        return;
+      }
+
       const message = messageInput.value.trim();
 
       if (!message) {
@@ -240,14 +246,20 @@ Ask Max: Hi there! Can I get your name, company name, and the machine you're wor
         return;
       }
 
+      isSending = true;
+
       const sessionId = sessionStorage.getItem("askMaxSessionId");
-      const threadId = sessionStorage.getItem("askMaxThreadId");
       const startedAt = sessionStorage.getItem("askMaxStartedAt");
+
+      const savedName = sessionStorage.getItem("askMaxName") || "";
+      const savedCompany = sessionStorage.getItem("askMaxCompany") || "";
+      const savedMachine = sessionStorage.getItem("askMaxMachine") || "";
 
       addMessage("You: " + message, "user");
 
       messageInput.value = "";
       sendButton.disabled = true;
+      messageInput.disabled = true;
       statusBox.textContent = "Status: Max is thinking...";
 
       try {
@@ -258,9 +270,11 @@ Ask Max: Hi there! Can I get your name, company name, and the machine you're wor
           },
           body: JSON.stringify({
             sessionId: sessionId,
-            threadId: threadId,
             startedAt: startedAt,
-            message: message
+            message: message,
+            name: savedName,
+            company: savedCompany,
+            machine: savedMachine
           })
         });
 
@@ -274,12 +288,20 @@ Ask Max: Hi there! Can I get your name, company name, and the machine you're wor
           sessionStorage.setItem("askMaxSessionId", data.sessionId);
         }
 
-        if (data.threadId) {
-          sessionStorage.setItem("askMaxThreadId", data.threadId);
-        }
-
         if (data.startedAt) {
           sessionStorage.setItem("askMaxStartedAt", data.startedAt);
+        }
+
+        if (data.name) {
+          sessionStorage.setItem("askMaxName", data.name);
+        }
+
+        if (data.company) {
+          sessionStorage.setItem("askMaxCompany", data.company);
+        }
+
+        if (data.machine) {
+          sessionStorage.setItem("askMaxMachine", data.machine);
         }
 
         addMessage("Ask Max: " + (data.reply || "No reply returned."), "bot");
@@ -294,8 +316,7 @@ Ask Max: Hi there! Can I get your name, company name, and the machine you're wor
           "<strong>Company:</strong> " + escapeHtml(data.company || "not captured") + "<br>" +
           "<strong>Machine:</strong> " + escapeHtml(data.machine || "not captured") + "<br>" +
           "<strong>Google Log:</strong> " + escapeHtml(googleLogText) + "<br>" +
-          "<strong>Session ID:</strong> " + escapeHtml(data.sessionId || "missing") + "<br>" +
-          "<strong>Thread ID:</strong> " + escapeHtml(data.threadId || "missing");
+          "<strong>Session ID:</strong> " + escapeHtml(data.sessionId || "missing");
 
         debugBox.textContent = JSON.stringify(data, null, 2);
 
@@ -308,15 +329,19 @@ Ask Max: Hi there! Can I get your name, company name, and the machine you're wor
 
         debugBox.textContent = error.stack || error.message;
       } finally {
+        isSending = false;
         sendButton.disabled = false;
+        messageInput.disabled = false;
         messageInput.focus();
       }
     }
 
     function resetSession() {
       sessionStorage.removeItem("askMaxSessionId");
-      sessionStorage.removeItem("askMaxThreadId");
       sessionStorage.removeItem("askMaxStartedAt");
+      sessionStorage.removeItem("askMaxName");
+      sessionStorage.removeItem("askMaxCompany");
+      sessionStorage.removeItem("askMaxMachine");
 
       chatBox.innerHTML = "";
 
@@ -344,6 +369,25 @@ Ask Max: Hi there! Can I get your name, company name, and the machine you're wor
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+    }
+
+    function linkifyText(text) {
+      const escaped = escapeHtml(text || "");
+      const urlRegex = /(https?:\/\/[^\s<]+)/g;
+
+      return escaped.replace(urlRegex, function(url) {
+        const cleanUrl = url.replace(/[),.]+$/, "");
+        const trailing = url.slice(cleanUrl.length);
+
+        return (
+          '<a href="' +
+          cleanUrl +
+          '" target="_blank" rel="noopener noreferrer">' +
+          cleanUrl +
+          "</a>" +
+          trailing
+        );
+      });
     }
   </script>
 </body>
