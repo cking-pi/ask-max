@@ -300,7 +300,7 @@ async function getAssistantReply({ userMessage, threadId }) {
 async function extractSessionDetails(userMessage) {
   try {
     const response = await openai.responses.create({
-      model: process.env.OPENAI_EXTRACT_MODEL || "gpt-4.1-mini",
+      model: process.env.OPENAI_EXTRACT_MODEL,
       input: [
         {
           role: "system",
