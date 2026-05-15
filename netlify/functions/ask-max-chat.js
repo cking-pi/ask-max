@@ -37,7 +37,7 @@ exports.handler = async function (event) {
       return jsonResponse(400, { error: "Message is required" }, corsHeaders);
     }
 
-    const extracted = extractSessionDetailsLocal({
+    const extracted = extractBasicSessionDetails({
       userMessage,
       existingName,
       existingCompany,
@@ -46,9 +46,7 @@ exports.handler = async function (event) {
 
     const finalName = existingName || extracted.name;
     const finalCompany = existingCompany || extracted.company;
-
-    const detectedMachine = extractMachines(userMessage, extracted.machine);
-    const finalMachine = mergeMachineText(existingMachine, detectedMachine);
+    const finalMachine = mergeMachineText(existingMachine, extracted.machine);
 
     const assistantResult = await getAssistantReply({
       userMessage,
@@ -161,57 +159,89 @@ function titleCase(value) {
     .trim();
 }
 
-function extractSessionDetailsLocal({
+/**
+ * Keep this intentionally light.
+ * The Assistant should decide exact machine/manual/resource context.
+ * This only captures obvious intake info for logging and session context.
+ */
+function extractBasicSessionDetails({
   userMessage,
   existingName,
   existingCompany,
   existingMachine
 }) {
   const message = cleanText(userMessage);
-  const detectedMachine = extractMachines(message, "");
 
   let name = "";
   let company = "";
+  let machine = "";
 
   if (!existingName || !existingCompany) {
-    let match;
+    const nameCompany = extractNameCompany(message);
 
-    match = message.match(/^(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
-    if (match) {
-      name = cleanLikelyName(match[1]);
-      company = cleanLikelyCompany(match[2]);
+    if (!existingName) {
+      name = nameCompany.name;
     }
 
-    if (!name && !company) {
-      match = message.match(/^my name is\s+(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
-      if (match) {
-        name = cleanLikelyName(match[1]);
-        company = cleanLikelyCompany(match[2]);
-      }
-    }
-
-    if (!name && !company) {
-      match = message.match(/^i'?m\s+(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
-      if (match) {
-        name = cleanLikelyName(match[1]);
-        company = cleanLikelyCompany(match[2]);
-      }
-    }
-
-    if (!name && !company) {
-      const words = message.split(/\s+/).filter(Boolean);
-
-      if (words.length >= 2 && words.length <= 6 && !detectedMachine) {
-        name = cleanLikelyName(words[0]);
-        company = cleanLikelyCompany(words.slice(1).join(" "));
-      }
+    if (!existingCompany) {
+      company = nameCompany.company;
     }
   }
 
+  if (!existingMachine) {
+    machine = extractMachineMention(message);
+  }
+
   return {
-    name: existingName ? "" : name,
-    company: existingCompany ? "" : company,
-    machine: existingMachine ? "" : detectedMachine
+    name,
+    company,
+    machine
+  };
+}
+
+function extractNameCompany(message) {
+  let name = "";
+  let company = "";
+
+  let match;
+
+  match = message.match(/^my name is\s+(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
+  if (match) {
+    return {
+      name: cleanLikelyName(match[1]),
+      company: cleanLikelyCompany(match[2])
+    };
+  }
+
+  match = message.match(/^i'?m\s+(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
+  if (match) {
+    return {
+      name: cleanLikelyName(match[1]),
+      company: cleanLikelyCompany(match[2])
+    };
+  }
+
+  match = message.match(/^(.+?)\s+(?:from|with|at|of)\s+(.+)$/i);
+  if (match) {
+    return {
+      name: cleanLikelyName(match[1]),
+      company: cleanLikelyCompany(match[2])
+    };
+  }
+
+  const machine = extractMachineMention(message);
+  const words = message.split(/\s+/).filter(Boolean);
+
+  // First prompt is always name/company, so simple replies like "jon abc company"
+  // should be treated as name + company.
+  if (words.length >= 2 && words.length <= 6 && !machine) {
+    name = cleanLikelyName(words[0]);
+    company = cleanLikelyCompany(words.slice(1).join(" "));
+  }
+
+  return {
+    name,
+    company
   };
 }
 
@@ -232,7 +262,6 @@ function cleanLikelyName(value) {
 function cleanLikelyCompany(value) {
   let cleaned = cleanText(value)
     .replace(/\b(?:and|i|we)\s+(?:have|need|am|are|use|using).*$/i, "")
-    .replace(/\b(?:javelin|voyager|saberjet|saber|titan|spartan|fastback|yukon|fusion|crosscut|slabvision|velocity).*$/i, "")
     .replace(/[.,]+$/g, "")
     .trim();
 
@@ -241,59 +270,29 @@ function cleanLikelyCompany(value) {
   return titleCase(cleaned);
 }
 
-function mergeMachineText(existingMachineText, newMachineText) {
-  const machines = new Set();
+/**
+ * Light machine capture only.
+ * Do not over-normalize or force series conversions here.
+ * The Assistant prompt/files should interpret machine details.
+ */
+function extractMachineMention(message) {
+  const text = cleanText(message);
+  const lower = text.toLowerCase();
 
-  String(existingMachineText || "")
-    .split(";")
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .forEach((item) => machines.add(item));
-
-  String(newMachineText || "")
-    .split(";")
-    .map((item) => item.trim())
-    .filter(Boolean)
-    .forEach((item) => machines.add(item));
-
-  return Array.from(machines).join("; ");
-}
-
-function extractMachines(userMessage, extractedMachineText = "") {
-  const combinedText = `${userMessage} ${extractedMachineText}`.toLowerCase();
-  const machines = new Set();
-
-  const has = (pattern) => pattern.test(combinedText);
-
-  if (has(/\btitan\s*4(?:000)?\b/i) || has(/\btitan\s*4000\s*series\b/i)) {
-    machines.add("TITAN 4000 Series");
-  }
-
-  if (has(/\btitan\s*3(?:000)?\b/i) || has(/\btitan\s*3000\s*series\b/i)) {
-    machines.add("TITAN 3000 Series");
-  }
-
-  if (has(/\btitan\s*2(?:000)?\b/i) || has(/\btitan\s*2000\s*series\b/i)) {
-    machines.add("TITAN 2000 Series");
-  }
-
-  if (has(/\btitan\s*1(?:000)?\b/i) || has(/\btitan\s*1000\s*series\b/i)) {
-    machines.add("TITAN 1000 Series");
-  }
-
-  if (has(/\btitan\s*fab\s*center\b/i)) {
-    machines.add("TITAN Fab Center");
-  }
-
-  if (has(/\bvoyager(?:\s*xp)?\b/i)) {
-    machines.add("VOYAGER XP");
-  }
-
-  const machinePatterns = [
+  const patterns = [
     ["SABERjet XP", /\bsaber\s*jet\s*xp\b|\bsaberjet\s*xp\b/i],
     ["SABERjet", /\bsaber\s*jet\b|\bsaberjet\b/i],
     ["SABER", /\bsaber\b/i],
     ["JAVELIN", /\bjavelin\b/i],
+    ["VOYAGER XP", /\bvoyager(?:\s*xp)?\b/i],
+
+    // Store TITAN wording closer to what the user gave instead of over-mapping.
+    ["TITAN Fab Center", /\btitan\s*fab\s*center\b/i],
+    ["TITAN 1000 Series", /\btitan\s*1000\s*series\b/i],
+    ["TITAN 2000 Series", /\btitan\s*2000\s*series\b/i],
+    ["TITAN 3000 Series", /\btitan\s*3000\s*series\b/i],
+    ["TITAN 4000 Series", /\btitan\s*4000\s*series\b/i],
+
     ["SPARTAN", /\bspartan\b/i],
     ["FASTBACK II", /\bfastback\s*ii\b|\bfastback\s*2\b/i],
     ["FASTBACK", /\bfastback\b/i],
@@ -317,17 +316,49 @@ function extractMachines(userMessage, extractedMachineText = "") {
     ["VELOCITY", /\bvelocity\b/i]
   ];
 
-  for (const [machineName, pattern] of machinePatterns) {
-    if (has(pattern)) {
-      machines.add(machineName);
+  const found = new Set();
+
+  for (const [name, pattern] of patterns) {
+    if (pattern.test(lower)) {
+      found.add(name);
     }
   }
 
-  if (machines.has("FASTBACK II")) machines.delete("FASTBACK");
-  if (machines.has("DESTINY XE")) machines.delete("DESTINY");
-  if (machines.has("HydroClear PRO")) machines.delete("HydroClear");
-  if (machines.has("YUKON II")) machines.delete("YUKON");
-  if (machines.has("CrossCut XP")) machines.delete("CrossCut");
+  // Capture specific TITAN model numbers without guessing series.
+  const titanModel = text.match(/\btitan\s*(\d{3,4})\b/i);
+  if (titanModel) {
+    found.add(`TITAN ${titanModel[1]}`);
+  }
+
+  // If user only says "TITAN", store TITAN instead of forcing a series.
+  if (/\btitan\b/i.test(text) && !Array.from(found).some((item) => item.startsWith("TITAN"))) {
+    found.add("TITAN");
+  }
+
+  // Remove less specific duplicates.
+  if (found.has("FASTBACK II")) found.delete("FASTBACK");
+  if (found.has("DESTINY XE")) found.delete("DESTINY");
+  if (found.has("HydroClear PRO")) found.delete("HydroClear");
+  if (found.has("YUKON II")) found.delete("YUKON");
+  if (found.has("CrossCut XP")) found.delete("CrossCut");
+
+  return Array.from(found).join("; ");
+}
+
+function mergeMachineText(existingMachineText, newMachineText) {
+  const machines = new Set();
+
+  String(existingMachineText || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => machines.add(item));
+
+  String(newMachineText || "")
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .forEach((item) => machines.add(item));
 
   return Array.from(machines).join("; ");
 }
@@ -343,13 +374,13 @@ Company: ${sessionContext.company || "Not provided yet"}
 Machine: ${sessionContext.machine || "Not provided yet"}
 
 Important rules:
-- The first user message is usually their name and company because the chatbot already asked for it.
+- The backend is only doing light intake capture. You are responsible for interpreting machine names, model numbers, manuals, resources, and context.
 - If name and company are already provided above, do not ask for them again.
-- If machine is already provided above, do not ask the user to confirm the machine.
-- If the user says a recognized Park Industries machine name, assume that is the machine they mean.
-- If the machine is JAVELIN, assume they mean the JAVELIN CNC Sawjet. Do not ask them to confirm.
-- Answer the user's service or maintenance question using the known machine context.
-- Only ask for missing information if it is truly required to answer the question.
+- If a machine is already provided above, do not ask the user to repeat it unless it is truly required to answer accurately.
+- If the user gives a recognized Park Industries machine name or model, use that as context and continue.
+- If the machine context is broad, such as "TITAN" without a model or series, ask one clear clarifying question only if the specific model/series is required.
+- Do not get stuck asking the same intake question repeatedly.
+- Answer the user's service or maintenance question using the known context and retrieved resources.
 - If a safety, electrical, hydraulic, calibration-sensitive, or unclear service issue is involved, remind them to follow proper safety procedures and contact Park Industries service if needed.
 `.trim();
 
