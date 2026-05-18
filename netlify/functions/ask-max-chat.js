@@ -26,10 +26,11 @@ exports.handler = async function (event) {
 
     const userMessage = cleanText(body.message);
     const sessionId = cleanText(body.sessionId) || createSessionId();
+    const threadIdFromRequest = cleanText(body.threadId);
     const startedAt = cleanText(body.startedAt) || new Date().toISOString();
     const lastUpdatedAt = new Date().toISOString();
 
-    // These are used only for logging/session return, not sent to OpenAI.
+    // Used only for logging/session return, not added as hidden context to OpenAI.
     const existingName = cleanText(body.name);
     const existingCompany = cleanText(body.company);
     const existingMachine = cleanText(body.machine);
@@ -50,7 +51,8 @@ exports.handler = async function (event) {
     const finalMachine = mergeMachineText(existingMachine, extracted.machine);
 
     const assistantResult = await getAssistantReply({
-      userMessage
+      userMessage,
+      threadId: threadIdFromRequest
     });
 
     const googleLog = await logToGoogleSheetWithTimeout({
@@ -68,6 +70,7 @@ exports.handler = async function (event) {
       200,
       {
         sessionId,
+        threadId: assistantResult.threadId,
         startedAt,
         lastUpdatedAt,
         reply: assistantResult.reply,
@@ -158,7 +161,7 @@ function titleCase(value) {
 /**
  * Light intake capture only.
  * This is only used for Google Sheets/session return.
- * It is NOT sent to the Assistant.
+ * It is NOT sent to the Assistant as hidden context.
  */
 function extractBasicSessionDetails({
   userMessage,
@@ -269,7 +272,7 @@ function cleanLikelyCompany(value) {
 /**
  * Light machine capture only for Google Sheets.
  * Do not over-normalize or force series conversions here.
- * The Assistant receives only the user's raw message and interprets context itself.
+ * The Assistant receives the raw user message inside the persistent thread.
  */
 function extractMachineMention(message) {
   const text = cleanText(message);
@@ -359,13 +362,19 @@ function mergeMachineText(existingMachineText, newMachineText) {
 }
 
 /**
- * Pure Assistant call.
- * No Netlify-added context is sent to OpenAI.
- * The Assistant only receives the user's raw message.
+ * Persistent Assistant call.
+ * Reuses threadId so the Assistant remembers prior messages.
+ * Sends only the raw user message, no added Netlify context.
  */
-async function getAssistantReply({ userMessage }) {
-  const thread = await openai.beta.threads.create();
-  const activeThreadId = thread.id;
+async function getAssistantReply({ userMessage, threadId }) {
+  let activeThreadId = threadId;
+
+  if (!activeThreadId) {
+    const thread = await openai.beta.threads.create();
+    activeThreadId = thread.id;
+  } else {
+    await waitForNoActiveRuns(activeThreadId);
+  }
 
   await openai.beta.threads.messages.create(activeThreadId, {
     role: "user",
@@ -410,6 +419,33 @@ async function getAssistantReply({ userMessage }) {
     threadId: activeThreadId,
     reply: reply || "Sorry, I was not able to generate a response."
   };
+}
+
+async function waitForNoActiveRuns(threadId) {
+  const maxAttempts = 20;
+  const delayMs = 500;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const runs = await openai.beta.threads.runs.list(threadId, {
+      limit: 5
+    });
+
+    const activeRun = runs.data.find((run) =>
+      ["queued", "in_progress", "requires_action", "cancelling"].includes(run.status)
+    );
+
+    if (!activeRun) {
+      return;
+    }
+
+    await sleep(delayMs);
+  }
+
+  throw new Error("Previous Ask Max response is still processing. Please wait a moment and try again.");
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function logToGoogleSheetWithTimeout({
