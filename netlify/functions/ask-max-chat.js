@@ -29,6 +29,7 @@ exports.handler = async function (event) {
     const startedAt = cleanText(body.startedAt) || new Date().toISOString();
     const lastUpdatedAt = new Date().toISOString();
 
+    // These are used only for logging/session return, not sent to OpenAI.
     const existingName = cleanText(body.name);
     const existingCompany = cleanText(body.company);
     const existingMachine = cleanText(body.machine);
@@ -49,12 +50,7 @@ exports.handler = async function (event) {
     const finalMachine = mergeMachineText(existingMachine, extracted.machine);
 
     const assistantResult = await getAssistantReply({
-      userMessage,
-      sessionContext: {
-        name: finalName,
-        company: finalCompany,
-        machine: finalMachine
-      }
+      userMessage
     });
 
     const googleLog = await logToGoogleSheetWithTimeout({
@@ -160,9 +156,9 @@ function titleCase(value) {
 }
 
 /**
- * Keep this intentionally light.
- * The Assistant should decide exact machine/manual/resource context.
- * This only captures obvious intake info for logging and session context.
+ * Light intake capture only.
+ * This is only used for Google Sheets/session return.
+ * It is NOT sent to the Assistant.
  */
 function extractBasicSessionDetails({
   userMessage,
@@ -232,8 +228,8 @@ function extractNameCompany(message) {
   const machine = extractMachineMention(message);
   const words = message.split(/\s+/).filter(Boolean);
 
-  // First prompt is always name/company, so simple replies like "jon abc company"
-  // should be treated as name + company.
+  // First prompt is name/company, so simple replies like "jon abc company"
+  // should be treated as name + company when no machine is detected.
   if (words.length >= 2 && words.length <= 6 && !machine) {
     name = cleanLikelyName(words[0]);
     company = cleanLikelyCompany(words.slice(1).join(" "));
@@ -271,9 +267,9 @@ function cleanLikelyCompany(value) {
 }
 
 /**
- * Light machine capture only.
+ * Light machine capture only for Google Sheets.
  * Do not over-normalize or force series conversions here.
- * The Assistant prompt/files should interpret machine details.
+ * The Assistant receives only the user's raw message and interprets context itself.
  */
 function extractMachineMention(message) {
   const text = cleanText(message);
@@ -286,7 +282,6 @@ function extractMachineMention(message) {
     ["JAVELIN", /\bjavelin\b/i],
     ["VOYAGER XP", /\bvoyager(?:\s*xp)?\b/i],
 
-    // Store TITAN wording closer to what the user gave instead of over-mapping.
     ["TITAN Fab Center", /\btitan\s*fab\s*center\b/i],
     ["TITAN 1000 Series", /\btitan\s*1000\s*series\b/i],
     ["TITAN 2000 Series", /\btitan\s*2000\s*series\b/i],
@@ -324,7 +319,7 @@ function extractMachineMention(message) {
     }
   }
 
-  // Capture specific TITAN model numbers without guessing series.
+  // Capture specific TITAN model numbers without guessing the series.
   const titanModel = text.match(/\btitan\s*(\d{3,4})\b/i);
   if (titanModel) {
     found.add(`TITAN ${titanModel[1]}`);
@@ -363,30 +358,18 @@ function mergeMachineText(existingMachineText, newMachineText) {
   return Array.from(machines).join("; ");
 }
 
-async function getAssistantReply({ userMessage, sessionContext }) {
+/**
+ * Pure Assistant call.
+ * No Netlify-added context is sent to OpenAI.
+ * The Assistant only receives the user's raw message.
+ */
+async function getAssistantReply({ userMessage }) {
   const thread = await openai.beta.threads.create();
   const activeThreadId = thread.id;
 
-  const contextText = `
-Known session context:
-Name: ${sessionContext.name || "Not provided yet"}
-Company: ${sessionContext.company || "Not provided yet"}
-Machine: ${sessionContext.machine || "Not provided yet"}
-
-Important rules:
-- The backend is only doing light intake capture. You are responsible for interpreting machine names, model numbers, manuals, resources, and context.
-- If name and company are already provided above, do not ask for them again.
-- If a machine is already provided above, do not ask the user to repeat it unless it is truly required to answer accurately.
-- If the user gives a recognized Park Industries machine name or model, use that as context and continue.
-- If the machine context is broad, such as "TITAN" without a model or series, ask one clear clarifying question only if the specific model/series is required.
-- Do not get stuck asking the same intake question repeatedly.
-- Answer the user's service or maintenance question using the known context and retrieved resources.
-- If a safety, electrical, hydraulic, calibration-sensitive, or unclear service issue is involved, remind them to follow proper safety procedures and contact Park Industries service if needed.
-`.trim();
-
   await openai.beta.threads.messages.create(activeThreadId, {
     role: "user",
-    content: `${contextText}\n\nUser message:\n${userMessage}`
+    content: userMessage
   });
 
   const run = await openai.beta.threads.runs.createAndPoll(activeThreadId, {
