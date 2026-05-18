@@ -30,7 +30,7 @@ exports.handler = async function (event) {
     const startedAt = cleanText(body.startedAt) || new Date().toISOString();
     const lastUpdatedAt = new Date().toISOString();
 
-    // Used only for logging/session return, not added as hidden context to OpenAI.
+    // Used only for Google Sheets/session return. Not sent as hidden context.
     const existingName = cleanText(body.name);
     const existingCompany = cleanText(body.company);
     const existingMachine = cleanText(body.machine);
@@ -160,8 +160,8 @@ function titleCase(value) {
 
 /**
  * Light intake capture only.
- * This is only used for Google Sheets/session return.
- * It is NOT sent to the Assistant as hidden context.
+ * Used only for Google Sheets/session return.
+ * Not sent to the Assistant as hidden context.
  */
 function extractBasicSessionDetails({
   userMessage,
@@ -231,8 +231,6 @@ function extractNameCompany(message) {
   const machine = extractMachineMention(message);
   const words = message.split(/\s+/).filter(Boolean);
 
-  // First prompt is name/company, so simple replies like "jon abc company"
-  // should be treated as name + company when no machine is detected.
   if (words.length >= 2 && words.length <= 6 && !machine) {
     name = cleanLikelyName(words[0]);
     company = cleanLikelyCompany(words.slice(1).join(" "));
@@ -272,7 +270,6 @@ function cleanLikelyCompany(value) {
 /**
  * Light machine capture only for Google Sheets.
  * Do not over-normalize or force series conversions here.
- * The Assistant receives the raw user message inside the persistent thread.
  */
 function extractMachineMention(message) {
   const text = cleanText(message);
@@ -322,18 +319,15 @@ function extractMachineMention(message) {
     }
   }
 
-  // Capture specific TITAN model numbers without guessing the series.
   const titanModel = text.match(/\btitan\s*(\d{3,4})\b/i);
   if (titanModel) {
     found.add(`TITAN ${titanModel[1]}`);
   }
 
-  // If user only says "TITAN", store TITAN instead of forcing a series.
   if (/\btitan\b/i.test(text) && !Array.from(found).some((item) => item.startsWith("TITAN"))) {
     found.add("TITAN");
   }
 
-  // Remove less specific duplicates.
   if (found.has("FASTBACK II")) found.delete("FASTBACK");
   if (found.has("DESTINY XE")) found.delete("DESTINY");
   if (found.has("HydroClear PRO")) found.delete("HydroClear");
@@ -364,7 +358,7 @@ function mergeMachineText(existingMachineText, newMachineText) {
 /**
  * Persistent Assistant call.
  * Reuses threadId so the Assistant remembers prior messages.
- * Sends only the raw user message, no added Netlify context.
+ * Sends only the raw user message, no extra Netlify context.
  */
 async function getAssistantReply({ userMessage, threadId }) {
   let activeThreadId = threadId;
@@ -373,7 +367,11 @@ async function getAssistantReply({ userMessage, threadId }) {
     const thread = await openai.beta.threads.create();
     activeThreadId = thread.id;
   } else {
-    await waitForNoActiveRuns(activeThreadId);
+    const threadReady = await waitForNoActiveRuns(activeThreadId);
+
+    if (!threadReady) {
+      throw new Error("Previous Ask Max response is still processing. Please wait a moment and try again.");
+    }
   }
 
   await openai.beta.threads.messages.create(activeThreadId, {
@@ -435,13 +433,13 @@ async function waitForNoActiveRuns(threadId) {
     );
 
     if (!activeRun) {
-      return;
+      return true;
     }
 
     await sleep(delayMs);
   }
 
-  throw new Error("Previous Ask Max response is still processing. Please wait a moment and try again.");
+  return false;
 }
 
 function sleep(ms) {
